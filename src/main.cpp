@@ -24,6 +24,37 @@ namespace {
  * - Reports runtime status over Serial and optional SSD1306 OLED.
  */
 
+/**
+ * Wiring quick reference (prototype bench setup)
+ *
+ * Servo (LS-3006, Hitec-style wire colors):
+ * - Black  -> GND (common ground with ESP32)
+ * - Red    -> External servo supply V+ (typically 5V)
+ * - Yellow -> SERVO_PIN (GPIO13 signal)
+ *
+ * Potentiometer:
+ * - Wiper (center pin) -> POT_PIN (A0)
+ * - Outer pin          -> 3.3V
+ * - Outer pin          -> GND
+ *
+ * Mode switch (INPUT_PULLUP logic):
+ * - Recommended 3-pin SPDT toggle wiring:
+ *   - Center/common pin -> MODE_SWITCH_PIN (GPIO12)
+ *   - One outer pin     -> GND  (this side selects oscillation mode)
+ *   - Other outer pin   -> not connected
+ * - Alternate 2-pin switch wiring:
+ *   - One pin -> MODE_SWITCH_PIN (GPIO12)
+ *   - One pin -> GND
+ * - Logic result:
+ *   - HIGH/open (not tied to GND) = serial control mode
+ *   - LOW/closed (tied to GND)    = oscillation test mode
+ *
+ * OLED (GM12864 SSD1306-compatible, optional):
+ * - VCC -> 3.3V
+ * - GND -> GND
+ * - SDA -> board SDA pin (I2C_SDA_PIN)
+ * - SCL -> board SCL pin (I2C_SCL_PIN)
+ */
 constexpr uint8_t SERVO_PIN = 13;
 constexpr uint8_t POT_PIN = A0;
 constexpr uint8_t MODE_SWITCH_PIN = 12;

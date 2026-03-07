@@ -27,10 +27,16 @@ Potentiometer:
 - Other side -> `GND`
 
 Mode switch (uses internal pull-up):
-- One side -> `GPIO12`
-- Other side -> `GND`
-- Switch open/high = `Serial mode`
-- Switch closed/low = `Oscillation mode`
+- Recommended 3-pin SPDT toggle:
+  - Center/common pin -> `GPIO12`
+  - One outer pin -> `GND`
+  - Other outer pin -> leave unconnected
+- Alternate 2-pin switch:
+  - One side -> `GPIO12`
+  - Other side -> `GND`
+- Logic:
+  - Not connected to GND (HIGH) = `Serial mode`
+  - Connected to GND (LOW) = `Oscillation mode`
 
 OLED (GM12864, I2C):
 - `VCC` -> `3.3V`

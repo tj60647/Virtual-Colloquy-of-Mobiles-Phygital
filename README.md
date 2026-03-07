@@ -78,12 +78,18 @@ Important caveat:
 - Pot side 2 -> `GND`
 
 ## Mode Switch Wiring
+- Recommended (3-pin SPDT toggle):
+- Center/common pin -> `GPIO12`
+- One outer pin -> `GND`
+- Other outer pin -> leave unconnected
+
+Alternate (2-pin switch):
 - One side -> `GPIO12`
 - One side -> `GND`
 
 Switch meaning:
-- HIGH (open): serial control mode
-- LOW (to ground): oscillation test mode
+- HIGH (not connected to GND): serial control mode
+- LOW (connected to GND): oscillation test mode
 
 ## OLED Wiring (Optional)
 - `VCC` -> `3.3V`
