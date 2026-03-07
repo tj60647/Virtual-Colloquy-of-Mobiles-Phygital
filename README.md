@@ -188,13 +188,16 @@ Functional blocks:
 ## System Diagram
 ```mermaid
 flowchart LR
-  Host[WebSerial or Serial Sender] -->|newline numeric command| ESP32[Feather ESP32 V2]
-  Switch[Mode Switch\nGPIO12] --> ESP32
-  Pot[Potentiometer\nA0 ADC] --> ESP32
+  Host[Computer via USB Serial\nWebSerial or Serial Monitor] <--> |single serial link\ncommands + status| ESP32[Feather ESP32 V2]
+  Switch[Mode Switch\nGPIO12] -->|digital input\nmode select| ESP32
+  Pot[Potentiometer\nA0 ADC] -->|analog input\ncalibration scale| ESP32
   ESP32 -->|PWM-like servo pulses| Servo[LS-3006 Servo]
-  ESP32 -->|I2C SDA/SCL| OLED[GM12864 OLED]
-  ESP32 -->|status lines| SerialMonitor[Serial Monitor]
+  ESP32 -->|I2C bus\nSDA + SCL| OLED[GM12864 OLED]
 ```
+
+Serial note:
+- There is one physical serial connection (USB from computer to ESP32).
+- Firmware receives commands and sends telemetry over that same connection.
 
 ## Control and Data Flow
 Startup flow:
@@ -227,6 +230,7 @@ Oscillation mode:
 Current protocol is intentionally simple:
 - One command per line
 - First numeric token in each line is used
+- Input and output share the same serial channel
 
 Valid examples:
 - `0`
