@@ -81,7 +81,10 @@ constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
 constexpr float OSCILLATION_AMPLITUDE = 100.0f;
-constexpr float OSCILLATION_PERIOD_MS = 3000.0f;
+// Oscillation speed target for bench safety/readability:
+// max angular speed ~= A * w <= 5 deg/sec, where A ~= 60 deg at full span.
+// This gives period T >= 2*pi*A/5 ~= 75.4 sec. Use 76 sec.
+constexpr float OSCILLATION_PERIOD_MS = 76000.0f;
 
 enum class ControlMode {
   Serial,
