@@ -82,7 +82,7 @@ constexpr float CALIBRATION_SPAN_MAX_SCALE = 1.0f;
 constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 32;
 
 constexpr size_t SERIAL_BUFFER_LEN = 64;
-constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 200;
+constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard oscillator drive rate
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
