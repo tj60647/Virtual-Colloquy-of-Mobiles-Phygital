@@ -1,6 +1,6 @@
 /*
  * main.cpp
- * Project: Virtual Colloquy Direction Indicator
+ * Project: Colloquy of Mobiles Virtual Simulation — Phygital
  * Author: Thomas J McLeish
  * License: MIT
  *
@@ -511,7 +511,7 @@ void setup() {
   serialTimeoutGuardActive = true;
   applyServoOutput();
 
-  Serial.println("Virtual Colloquy Direction Indicator ready.");
+  Serial.println("Colloquy of Mobiles Virtual Simulation Phygital ready.");
   Serial.println("Send newline-terminated commands in range -100..100.");
   Serial.println("Example commands: 0, 25, -40, 100");
   Serial.println("Mode switch HIGH = serial control; LOW = automatic oscillation test.");

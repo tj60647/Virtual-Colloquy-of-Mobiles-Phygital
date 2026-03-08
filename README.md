@@ -1,4 +1,4 @@
-# Virtual Colloquy Direction Indicator
+# Colloquy of Mobiles Virtual Simulation — Phygital
 
 Prototype firmware for an ESP32-based pointer device that converts position commands from a computer into physical servo motion.
 

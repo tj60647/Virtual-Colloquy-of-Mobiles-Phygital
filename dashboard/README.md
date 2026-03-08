@@ -1,6 +1,6 @@
-# Virtual Colloquy WebSerial Dashboard
+# Colloquy of Mobiles Virtual Simulation Phygital — WebSerial Dashboard
 
-Web dashboard for testing the Virtual Colloquy Direction Indicator firmware over WebSerial.
+Web dashboard for testing the Colloquy of Mobiles Virtual Simulation Phygital firmware over WebSerial.
 
 ## Why This Is A Separate Folder
 Keeping this app in `dashboard/` separates:

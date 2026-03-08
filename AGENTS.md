@@ -1,4 +1,4 @@
-# Virtual Colloquy Direction Indicator - Agent Instructions
+# Colloquy of Mobiles Virtual Simulation — Phygital — Agent Instructions
 
 This project is in a prototyping phase.
 
@@ -23,7 +23,7 @@ Add this header at the top of every new source/header file:
 ```cpp
 /*
  * <filename>
- * Project: Virtual Colloquy Direction Indicator
+ * Project: Colloquy of Mobiles Virtual Simulation — Phygital
  * Author: Thomas J McLeish
  * License: MIT
  *
