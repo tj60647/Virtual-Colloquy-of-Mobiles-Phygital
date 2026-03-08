@@ -244,23 +244,6 @@ float readCalibrationSpanScale(uint16_t* potRawOut) {
 }
 
 /**
- * Map a command value to a bounded servo angle based on live span scaling.
- *
- * @param commandValue Command value expected in -100..100 range.
- * @param spanScale Pot-derived multiplier for available travel.
- * @return Target servo angle in [SERVO_MIN_ANGLE, SERVO_MAX_ANGLE].
- */
-float commandToServoAngle(float commandValue, float spanScale) {
-  const float center = (SERVO_MIN_ANGLE + SERVO_MAX_ANGLE) * 0.5f;
-  const float maxTravelFromCenter =
-      ((SERVO_MAX_ANGLE - SERVO_MIN_ANGLE) * 0.5f) * spanScale;
-
-  const float normalized = normalizedFromCommand(commandValue);
-  const float angle = center + normalized * maxTravelFromCenter;
-  return clampf(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-}
-
-/**
  * Compute expected minimum and maximum reachable angle for current span scale.
  *
  * @param spanScale Current calibration span scale in [0, 1].
@@ -413,12 +396,20 @@ void applyServoOutput() {
   lastSpanScale = spanScale;
   expectedServoRangeFromScale(spanScale, &lastExpectedMinAngle,
                               &lastExpectedMaxAngle);
-  // Snap the range endpoints to the nearest display increment so the dashboard
-  // shows clean step changes as the knob is adjusted, not a jittery float stream.
+  // Snap the range endpoints to the nearest increment. This quantizes away
+  // ADC noise from the pot before it propagates into the servo output.
+  // Everything downstream — including the servo command — uses these snapped
+  // values, so the jitter is eliminated at the source.
   lastExpectedMinAngle = snapToNearestIncrement(lastExpectedMinAngle, RANGE_DISPLAY_STEP_DEG);
   lastExpectedMaxAngle = snapToNearestIncrement(lastExpectedMaxAngle, RANGE_DISPLAY_STEP_DEG);
-  // Servo moves at full continuous resolution — no snap on the output angle.
-  appliedAngle = commandToServoAngle(commandedPosition, spanScale);
+
+  // Derive the applied angle from the snapped bounds, not from raw spanScale.
+  // This keeps the servo output consistent with what rn/rx report.
+  const float snappedCenter   = (lastExpectedMinAngle + lastExpectedMaxAngle) * 0.5f;
+  const float snappedHalfSpan = (lastExpectedMaxAngle - lastExpectedMinAngle) * 0.5f;
+  const float normalized      = normalizedFromCommand(commandedPosition);
+  appliedAngle = clampf(snappedCenter + normalized * snappedHalfSpan,
+                        SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
   pointerServo.write(static_cast<int>(appliedAngle));
 }
 
