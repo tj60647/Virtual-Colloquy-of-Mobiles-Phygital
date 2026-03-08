@@ -123,6 +123,16 @@ uint32_t potFilterSum = 0;
 bool potFilterInitialized = false;
 
 /**
+ * Convert angle values to nearest whole-degree integer for user-facing output.
+ *
+ * @param angleDeg Angle value in degrees.
+ * @return Rounded whole-degree integer.
+ */
+int toWholeDegrees(float angleDeg) {
+  return static_cast<int>(roundf(angleDeg));
+}
+
+/**
  * Clamp a floating-point value into an explicit inclusive range.
  *
  * @param value Input value to clamp.
@@ -392,11 +402,11 @@ void printStatus() {
   Serial.print(",potRaw=");
   Serial.print(lastPotRaw);
   Serial.print(",rangeMinDeg=");
-  Serial.print(lastExpectedMinAngle, 1);
+  Serial.print(toWholeDegrees(lastExpectedMinAngle));
   Serial.print(",rangeMaxDeg=");
-  Serial.print(lastExpectedMaxAngle, 1);
+  Serial.print(toWholeDegrees(lastExpectedMaxAngle));
   Serial.print(",servoAngleDeg=");
-  Serial.println(appliedAngle, 1);
+  Serial.println(toWholeDegrees(appliedAngle));
 }
 
 /**
@@ -467,17 +477,13 @@ void refreshOledStatus() {
   oled.print("Command: ");
   oled.println(commandedPosition, 1);
 
-  oled.print("Range min: ");
-  oled.println(lastExpectedMinAngle, 1);
-
-  oled.print("Range max: ");
-  oled.println(lastExpectedMaxAngle, 1);
+  oled.print("Range: ");
+  oled.print(toWholeDegrees(lastExpectedMinAngle));
+  oled.print("-");
+  oled.println(toWholeDegrees(lastExpectedMaxAngle));
 
   oled.print("Angle deg: ");
-  oled.println(appliedAngle, 1);
-
-  oled.print("I2C: 0x");
-  oled.println(oledAddress, HEX);
+  oled.println(toWholeDegrees(appliedAngle));
 
   oled.display();
 }
