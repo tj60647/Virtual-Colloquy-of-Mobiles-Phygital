@@ -10,9 +10,13 @@ type Telemetry = {
   p?: string;   // pot ADC — stage-2 filtered (EMA of box average); what the servo uses
   pr?: string;  // pot ADC — raw, unfiltered; compare to p to measure filter effectiveness
   a?: string;   // applied servo angle (degrees)
-  rn?: string;  // range minimum angle (degrees)
-  rx?: string;  // range maximum angle (degrees)
-  fv?: string;  // firmware version string (e.g. "0.1.0")
+  rn?: string;  // range minimum angle (degrees) — snapped to 5° steps for display
+  rx?: string;  // range maximum angle (degrees) — snapped to 5° steps for display
+  sm?: string;  // servo range min (degrees) — unsnapped debug reference from EMA path
+  sx?: string;  // servo range max (degrees) — unsnapped debug reference from EMA path
+  pw?: string;  // PWM pulse width µs sent to servo hardware (1000=0°, 1500=60°, 2000=120°)
+  fv?: string;  // firmware version string (e.g. "0.1.0") — sent once/sec in lps= line
+  lps?: string; // loop rate (loops per second) — sent once/sec alongside fv
 };
 
 type ConnectErrorInfo = {
@@ -75,7 +79,9 @@ function sparkPoints(
     .join(" ");
 }
 
-function parseTelemetry(line: string): Telemetry {
+// Returns null for lines that contain no key=value pairs (startup banners,
+// debug prints, etc.) so callers can skip updating telemetry state entirely.
+function parseTelemetry(line: string): Telemetry | null {
   const out: Telemetry = {};
   line.split(",").forEach((part) => {
     const [k, v] = part.split("=");
@@ -84,7 +90,8 @@ function parseTelemetry(line: string): Telemetry {
     }
     out[k.trim() as keyof Telemetry] = v.trim();
   });
-  return out;
+  // If nothing was parsed it was a plain-text line with no key=value pairs.
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 function explainConnectError(error: unknown): ConnectErrorInfo {
@@ -483,20 +490,22 @@ export default function Page() {
           }
           setLastLine(line);
           const parsed = parseTelemetry(line);
-          setTelemetry(parsed);
+          if (parsed !== null) {
+            setTelemetry((prev) => ({ ...prev, ...parsed }));
+            setSparkHistories((prev) => {
+              const push = (arr: number[], v: string | undefined): number[] => {
+                if (v === undefined) return arr;
+                const n = Number(v);
+                if (!Number.isFinite(n)) return arr;
+                return [...arr, n].slice(-SPARK_MAX_POINTS);
+              };
+              return { p: push(prev.p, parsed.p), c: push(prev.c, parsed.c), a: push(prev.a, parsed.a) };
+            });
+          }
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
           lastRxMsRef.current = Date.now();
           setStale(false);
-          setSparkHistories((prev) => {
-            const push = (arr: number[], v: string | undefined): number[] => {
-              if (v === undefined) return arr;
-              const n = Number(v);
-              if (!Number.isFinite(n)) return arr;
-              return [...arr, n].slice(-SPARK_MAX_POINTS);
-            };
-            return { p: push(prev.p, parsed.p), c: push(prev.c, parsed.c), a: push(prev.a, parsed.a) };
-          });
         }
       }
     } catch (error) {
@@ -550,20 +559,22 @@ export default function Page() {
           if (!line.trim()) continue;
           setLastLine(line);
           const parsedBle = parseTelemetry(line);
-          setTelemetry(parsedBle);
+          if (parsedBle !== null) {
+            setTelemetry((prev) => ({ ...prev, ...parsedBle }));
+            setSparkHistories((prev) => {
+              const push = (arr: number[], v: string | undefined): number[] => {
+                if (v === undefined) return arr;
+                const n = Number(v);
+                if (!Number.isFinite(n)) return arr;
+                return [...arr, n].slice(-SPARK_MAX_POINTS);
+              };
+              return { p: push(prev.p, parsedBle.p), c: push(prev.c, parsedBle.c), a: push(prev.a, parsedBle.a) };
+            });
+          }
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
           lastRxMsRef.current = Date.now();
           setStale(false);
-          setSparkHistories((prev) => {
-            const push = (arr: number[], v: string | undefined): number[] => {
-              if (v === undefined) return arr;
-              const n = Number(v);
-              if (!Number.isFinite(n)) return arr;
-              return [...arr, n].slice(-SPARK_MAX_POINTS);
-            };
-            return { p: push(prev.p, parsedBle.p), c: push(prev.c, parsedBle.c), a: push(prev.a, parsedBle.a) };
-          });
         }
       };
       bleTxListenerRef.current = bleListener;
@@ -684,6 +695,7 @@ export default function Page() {
             <h2>2) Streaming Data</h2>
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
             <div className="kv"><span>firmware</span><code>{telemetry.fv ?? "-"}</code></div>
+            <div className="kv"><span>loop/sec</span><code>{telemetry.lps ?? "-"}</code></div>
             {connected && stale && (
               <div className="badge warn" style={{ marginBottom: 4 }}>no data — device may be frozen</div>
             )}
@@ -708,7 +720,16 @@ export default function Page() {
                 <code>{Math.round(currentAngleDeg)} deg</code>
               </span>
             </div>
-            <div className="kv"><span>range</span><code>{Math.round(rangeMinDeg)} to {Math.round(rangeMaxDeg)} deg</code></div>
+            {/* Signal chain: shows the full cmd → angle → pulse path so the
+                entire mapping from dashboard command to servo hardware is visible. */}
+            <div className="kv">
+              <span>signal chain</span>
+              <code>
+                {telemetry.c ?? "?"} → {telemetry.a ?? "?"}° → {telemetry.pw ? `${telemetry.pw} µs` : "?"}
+              </code>
+            </div>
+            <div className="kv"><span>range (active, snapped)</span><code>{Math.round(rangeMinDeg)} – {Math.round(rangeMaxDeg)}°</code></div>
+            <div className="kv"><span>range (unsnapped debug)</span><code>{telemetry.sm ?? "-"} – {telemetry.sx ?? "-"}°</code></div>
             <div className="kv kv-spark">
               <span>pot ADC</span>
               <span className="spark-cell">

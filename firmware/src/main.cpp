@@ -20,7 +20,7 @@
  * - Receives newline-delimited serial commands in the range -100..100.
  * - Supports a hardware switch to choose serial control vs test oscillation mode.
  * - Reads a potentiometer to scale active servo span for calibration.
- * - Drives an LS-3006 servo in open loop.
+ * - Drives an MG996R servo in open loop.
  * - Reports runtime status over USB Serial, BLE (Nordic UART Service), and optional SSD1306 OLED.
  * - Commands are accepted identically over USB or BLE — same protocol, same behavior.
  */
@@ -28,10 +28,10 @@
 /**
  * Wiring quick reference (prototype bench setup)
  *
- * Servo (LS-3006, Hitec-style wire colors):
- * - Black  -> GND (common ground with ESP32)
- * - Red    -> External servo supply V+ (typically 5V)
- * - Yellow -> SERVO_PIN (GPIO13 signal)
+ * Servo (MG996R, standard wire colors):
+ * - Brown  -> GND (common ground with ESP32)
+ * - Red    -> External servo supply V+ (4.8–7.2 V; use dedicated supply, not ESP32 3.3 V)
+ * - Orange -> SERVO_PIN (GPIO13 signal)
  *
  * Potentiometer:
  * - Wiper (center pin) -> POT_PIN (A0)
@@ -63,21 +63,34 @@ constexpr uint8_t MODE_SWITCH_PIN = 12;
 constexpr uint8_t I2C_SDA_PIN = SDA;
 constexpr uint8_t I2C_SCL_PIN = SCL;
 
-// LS-3006 exact travel/pulse specs are not yet confirmed, so start conservative.
-constexpr int SERVO_MIN_US = 1000;
-constexpr int SERVO_MAX_US = 2000;
-// For prototype calibration behavior, assume logical 0..180 degree span.
-// Potentiometer at maximum will collapse travel to center (~90 deg).
+// MG996R pulse calibration.
+//
+// The MG996R travels approximately 120° total (60° each side of center) across
+// the standard 1 ms – 2 ms pulse range at 50 Hz.
+//
+// ESP32Servo maps write(0)→MIN_US and write(180)→MAX_US internally (0–180
+// degree range hard-coded in the library). To make write(0)=1000 µs and
+// write(120)=2000 µs we set MAX_US=2500 µs:
+//   1000 + (120/180) × (2500–1000) = 1000 + 1000 = 2000 µs ✓
+// The angle clamp on [SERVO_MIN_ANGLE, SERVO_MAX_ANGLE] ensures we never
+// actually command above 120°, so the servo never sees more than 2000 µs.
+//
+// Dead band: 5 µs (datasheet) — very fine resolution.
+constexpr int SERVO_MIN_US = 1000;  // 0°  → 1000 µs
+constexpr int SERVO_MAX_US = 2500;  // calibration anchor so write(120) → 2000 µs
+
+// Physical rotation range of the MG996R.
+// Center is 60° (half of 120°). Potentiometer at maximum collapses travel to center.
 constexpr float SERVO_MIN_ANGLE = 0.0f;
-constexpr float SERVO_MAX_ANGLE = 180.0f;
+constexpr float SERVO_MAX_ANGLE = 120.0f;
 
 constexpr float COMMAND_MIN = -100.0f;
 constexpr float COMMAND_MAX = 100.0f;
 
 // Potentiometer controls how much of the available servo span is used.
 // User request mapping:
-// - pot at 0    => full range (span scale = 1.0)
-// - pot at max  => zero range, hold center (~90 deg) (span scale = 0.0)
+// - pot at 0    => full range (span scale = 1.0) → servo sweeps 0°–120°
+// - pot at max  => zero range, hold center (60°) (span scale = 0.0)
 constexpr float CALIBRATION_SPAN_MIN_SCALE = 0.0f;
 constexpr float CALIBRATION_SPAN_MAX_SCALE = 1.0f;
 // 64 samples gives a wider averaging window to better reject BLE radio
@@ -115,6 +128,12 @@ constexpr float RANGE_DISPLAY_STEP_DEG = 5.0f;
 // filter follows intentional changes while rejecting noise bursts.
 // alpha per update = dt_us / (POT_EMA_TAU_US + dt_us)
 constexpr float POT_EMA_TAU_US = 125000.0f;
+
+// Minimum time to run the pot EMA filter before trusting the output.
+// Four time constants (4 × 125 ms = 500 ms) means the EMA is at ~98% of its
+// final value — effectively settled. The servo is held at center during this
+// window and does not move until potEmaSettled is set at the end of setup().
+constexpr uint32_t POT_EMA_SETTLE_MS = 500;
 
 // Hysteresis margin applied around each snap boundary. Without this a
 // filtered reading hovering within 1 ADC count of a 5-degree boundary
@@ -171,7 +190,7 @@ char serialBuffer[SERIAL_BUFFER_LEN] = {0};
 size_t serialBufferPos = 0;
 
 float commandedPosition = 0.0f;
-float appliedAngle = 90.0f;
+float appliedAngle = 60.0f;  // start at center of MG996R 120° range
 uint16_t lastPotRaw = 0;     // raw ADC sample, preserved for debug telemetry (pr=)
 uint16_t lastPotAverage = 0; // box-filter output (stage 1)
 float    lastPotEma = 0.0f;  // EMA output (stage 2) — this is what the servo uses
@@ -192,6 +211,21 @@ uint16_t potFilterBuffer[POT_RUNNING_AVERAGE_SAMPLES] = {0};
 size_t potFilterIndex = 0;
 uint32_t potFilterSum = 0;
 bool potFilterInitialized = false;
+
+// True once the ADC filter has been running for POT_EMA_SETTLE_MS.
+// applyServoOutput() returns early until this is set so the servo does not
+// chase an unsettled pot reading during the first half-second after boot.
+bool potEmaSettled = false;
+
+// Unsnapped range reference — derived directly from the continuous EMA output.
+// This is retained for diagnostics (sm/sx telemetry) so we can inspect what
+// the filters are doing under the hood.
+//
+// Active servo control now uses the snapped bounds in
+// lastExpectedMinAngle/Max (rn/rx telemetry) to intentionally quantize the
+// envelope to 5-degree steps with hysteresis.
+float lastServoMinAngle = SERVO_MIN_ANGLE;
+float lastServoMaxAngle = SERVO_MAX_ANGLE;
 
 /**
  * Convert angle values to nearest whole-degree integer for user-facing output.
@@ -516,10 +550,13 @@ void updatePotSample() {
 
   const float spanScale = readCalibrationSpanScale();
   lastSpanScale = spanScale;
-  expectedServoRangeFromScale(spanScale, &lastExpectedMinAngle,
-                              &lastExpectedMaxAngle);
-  lastExpectedMinAngle = snapWithHysteresis(lastExpectedMinAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMin);
-  lastExpectedMaxAngle = snapWithHysteresis(lastExpectedMaxAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMax);
+  // Compute the continuous (unsnapped) range for debug telemetry (sm/sx).
+  expectedServoRangeFromScale(spanScale, &lastServoMinAngle, &lastServoMaxAngle);
+
+  // Snap from the unsnapped reference for active control + display telemetry
+  // (rn= / rx= fields and OLED). Hysteresis prevents chattering at boundaries.
+  lastExpectedMinAngle = snapWithHysteresis(lastServoMinAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMin);
+  lastExpectedMaxAngle = snapWithHysteresis(lastServoMaxAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMax);
 }
 
 /**
@@ -534,19 +571,29 @@ void updatePotSample() {
  * - Calls pointerServo.write() only when integer angle changes.
  */
 void applyServoOutput() {
-  // Derive the applied angle from the snapped bounds cached by updatePotSample().
-  // This keeps the servo output consistent with what rn/rx report.
-  const float snappedCenter   = (lastExpectedMinAngle + lastExpectedMaxAngle) * 0.5f;
-  const float snappedHalfSpan = (lastExpectedMaxAngle - lastExpectedMinAngle) * 0.5f;
-  const float normalized      = normalizedFromCommand(commandedPosition);
-  appliedAngle = clampf(snappedCenter + normalized * snappedHalfSpan,
+  // Hold servo still until the pot EMA filter has settled after boot.
+  // Without this guard the first ~500 ms of loop() would chase an unsettled
+  // filter value and make the servo jump unpredictably on power-up.
+  if (!potEmaSettled) {
+    return;
+  }
+
+  // Use the snapped range for active servo control. This intentionally makes
+  // the envelope move in 5-degree increments with hysteresis, suppressing
+  // sub-degree drift from the EMA path.
+  const float servoCenter   = (lastExpectedMinAngle + lastExpectedMaxAngle) * 0.5f;
+  const float servoHalfSpan = (lastExpectedMaxAngle - lastExpectedMinAngle) * 0.5f;
+  const float normalized    = normalizedFromCommand(commandedPosition);
+  appliedAngle = clampf(servoCenter + normalized * servoHalfSpan,
                         SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
 
   // Only push a new pulse to the servo when the output angle has actually
   // changed.  servo.write() is not free — it triggers a PWM recalculation
   // and the servo motor will twitch on any change, so suppressing identical
   // writes prevents buzzing and saves a little CPU.
-  const int targetAngle = static_cast<int>(appliedAngle);
+  // roundf → cast avoids the floor-truncation that would make 59.9° write as
+  // 59 instead of 60, causing a systematic low-side bias.
+  const int targetAngle = static_cast<int>(roundf(appliedAngle));
   if (targetAngle != lastAppliedServoAngle) {
     pointerServo.write(targetAngle);
     lastAppliedServoAngle = targetAngle;
@@ -667,29 +714,44 @@ void printStatus() {
   lastStatusPrintMs = now;
 
   // Build the telemetry frame once and route to all active transports.
-  // Using snprintf ensures the frame is a proper null-terminated string
-  // that can be sent to Serial and BLE without duplication.
-  // Frame budget check (buffer is 96 bytes):
-  // c=-100,m=o,g=1,p=4095,pr=4095,a=180,rn=180,rx=180,fv=0.1.0 = ~62 chars + null = 63
-  char frame[96];
+  // Frame budget check (buffer is 128 bytes):
+  // c=-100.0,m=o,g=1,p=4095,pr=4095,a=120.0,rn=120,rx=120,sm=120.0,sx=0.0,pw=2000
+  // = ~82 chars + null = 83 — fits comfortably.
+  //
+  // Float fields (1 decimal place) expose sub-degree values that the previous
+  // integer logging was hiding. The servo write decision rounds appliedAngle
+  // to the nearest integer, so drift of ±0.5° around a boundary looks like
+  // no change in integer logs but triggers repeated write() calls. The 1dp
+  // format makes that oscillation visible:
+  //   c=  — commanded position as received (float, 1dp)
+  //   a=  — appliedAngle before roundf/write (float, 1dp)
+  //   sm= — range min from unsnapped EMA path (float, 1dp, debug reference)
+  //   sx= — range max from unsnapped EMA path (float, 1dp, debug reference)
+  // rn=/rx= remain integers — they are intentionally snapped to 5° steps.
+  // p=/pr= remain integer ADC counts — already higher resolution than needed.
+  char frame[128];
+  const unsigned int pulseWidthUs = static_cast<unsigned int>(
+      SERVO_MIN_US + (lastAppliedServoAngle * (SERVO_MAX_US - SERVO_MIN_US)) / 180);
   snprintf(frame, sizeof(frame),
-           "c=%d,m=%c,g=%d,p=%u,pr=%u,a=%d,rn=%d,rx=%d,fv=%s",
-           static_cast<int>(roundf(commandedPosition)),
+           "c=%.1f,m=%c,g=%d,p=%u,pr=%u,a=%.1f,rn=%d,rx=%d,sm=%.1f,sx=%.1f,pw=%u",
+           commandedPosition,
            currentMode == ControlMode::Oscillation ? 'o' : 's',
            serialTimeoutGuardActive ? 1 : 0,
-           static_cast<unsigned int>(lastPotEma),  // stage-2 filtered (what servo uses)
-           static_cast<unsigned int>(lastPotRaw),  // raw ADC — debug: compare to p to see noise
-           toWholeDegrees(appliedAngle),
+           static_cast<unsigned int>(lastPotEma),
+           static_cast<unsigned int>(lastPotRaw),
+           appliedAngle,
            toWholeDegrees(lastExpectedMinAngle),
            toWholeDegrees(lastExpectedMaxAngle),
-           FIRMWARE_VERSION);
+           lastServoMinAngle,
+           lastServoMaxAngle,
+           pulseWidthUs);
 
   Serial.println(frame);
 
   // Notify BLE client if one is connected. Append \n so the dashboard
   // line-split parser treats this the same as a USB serial line.
   if (bleClientConnected && bleTxCharacteristic != nullptr) {
-    char frameNl[98];
+    char frameNl[130];
     snprintf(frameNl, sizeof(frameNl), "%s\n", frame);
     bleTxCharacteristic->setValue(reinterpret_cast<uint8_t*>(frameNl), strlen(frameNl));
     bleTxCharacteristic->notify();
@@ -848,6 +910,38 @@ void updateHeartbeat() {
 }
 
 /**
+ * Three-second boot sweep to confirm servo is alive and range is correct.
+ *
+ * Sequence: center → minimum → maximum → center.
+ * Uses the snapped active control range (lastExpectedMinAngle/Max) so the
+ * sweep matches the same quantized envelope used during runtime.
+ *
+ * Call once from setup() after the EMA warmup, before loop() starts.
+ * Total blocking time: ~3 seconds (500 + 1000 + 1000 + 500 ms).
+ */
+void runBootSweep() {
+  const int centerAngle = static_cast<int>((lastExpectedMinAngle + lastExpectedMaxAngle) * 0.5f);
+  const int minAngle    = static_cast<int>(lastExpectedMinAngle);
+  const int maxAngle    = static_cast<int>(lastExpectedMaxAngle);
+
+  Serial.print("Boot sweep: range ");
+  Serial.print(minAngle);
+  Serial.print("\u00b0\u2013");
+  Serial.print(maxAngle);
+  Serial.println("\u00b0 | center \u2192 min \u2192 max \u2192 center");
+
+  pointerServo.write(centerAngle);  delay(500);
+  pointerServo.write(minAngle);     delay(1000);
+  pointerServo.write(maxAngle);     delay(1000);
+  pointerServo.write(centerAngle);  delay(500);
+
+  // Update tracking globals so loop() starts from a known position.
+  appliedAngle = static_cast<float>(centerAngle);
+  lastAppliedServoAngle = centerAngle;
+  Serial.println("Boot sweep complete.");
+}
+
+/**
  * Arduino setup entry point for one-time peripheral initialization.
  */
 void setup() {
@@ -873,10 +967,41 @@ void setup() {
   pointerServo.setPeriodHertz(50);
   pointerServo.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
 
+  // Move immediately to center so the servo starts from a known position
+  // while the pot filter warms up. applyServoOutput() is not used here
+  // because potEmaSettled is still false at this point.
+  {
+    const int bootCenter = static_cast<int>((SERVO_MIN_ANGLE + SERVO_MAX_ANGLE) * 0.5f);
+    pointerServo.write(bootCenter);
+    appliedAngle = static_cast<float>(bootCenter);
+    lastAppliedServoAngle = bootCenter;
+  }
+
+  // Pump the ADC filter for POT_EMA_SETTLE_MS (4 × tau = 500 ms) so the EMA
+  // has reached a stable value before the servo tracks it.
+  // delay(1) between samples yields to the FreeRTOS scheduler so the
+  // BLE stack and watchdog timer are not starved during this blocking period.
+  Serial.println("Warming up pot filter...");
+  {
+    const uint32_t warmupStartMs = millis();
+    while (millis() - warmupStartMs < POT_EMA_SETTLE_MS) {
+      lastSpanScale = readCalibrationSpanScale();
+      delay(1);
+    }
+    // Sync servo min/max from the now-settled EMA.
+    expectedServoRangeFromScale(lastSpanScale, &lastServoMinAngle, &lastServoMaxAngle);
+    lastExpectedMinAngle = lastServoMinAngle;
+    lastExpectedMaxAngle = lastServoMaxAngle;
+    Serial.println("Pot filter settled.");
+  }
+
+  // Run the 3-second boot sweep to confirm servo travel, then unlock normal operation.
+  runBootSweep();
+  potEmaSettled = true;
+
   commandedPosition = 0.0f;
   lastValidSerialCommandMs = millis();
   serialTimeoutGuardActive = true;
-  applyServoOutput();
 
   Serial.println("Colloquy of Mobiles Virtual Simulation Phygital ready.");
   Serial.println("Send newline-terminated commands in range -100..100.");
@@ -925,16 +1050,19 @@ void loop() {
   refreshOledStatus();
   updateHeartbeat();
 
-  // Debug: count confirmed ticks per second. With the 1 kHz floor this
-  // should read ~1000 when no BLE client is connected, and somewhat lower
-  // when BLE is active and the stack takes some tick slots.
-  // Remove once loop rate is confirmed.
+  // Emit a 1 Hz diagnostics line with the loop rate and firmware version.
+  // lps= (loops per second) shows how close the firmware is to its 1 kHz
+  // target: ~1000 with no BLE client, lower when BLE is active.
+  // fv= (firmware version) is sent here rather than in every 20 Hz frame
+  // because it never changes — once the dashboard receives it once, the
+  // merge-semantics update keeps it displayed indefinitely.
   static uint32_t dbgCount = 0;
   static uint32_t dbgLastMs = 0;
   ++dbgCount;
   if (millis() - dbgLastMs >= 1000) {
-    Serial.print("loop/sec: ");
-    Serial.println(dbgCount);
+    char lpsFrame[32];
+    snprintf(lpsFrame, sizeof(lpsFrame), "lps=%u,fv=%s", dbgCount, FIRMWARE_VERSION);
+    Serial.println(lpsFrame);
     dbgCount = 0;
     dbgLastMs = millis();
   }
