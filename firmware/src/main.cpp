@@ -136,7 +136,7 @@ constexpr float OSC_MAX_ACCEL          = 5.0f;  // command units per second²
 #ifndef NEOPIXEL_POWER
 #define NEOPIXEL_POWER 2
 #endif
-constexpr uint32_t HEARTBEAT_INTERVAL_MS    = 33;   // ~30 Hz update for smooth animation
+constexpr uint32_t HEARTBEAT_INTERVAL_MS    = 50;   // 20 Hz update — clean divisor of 1000 ms
 constexpr uint32_t HEARTBEAT_PERIOD_MS      = 3000; // one full breathe cycle
 constexpr uint8_t  HEARTBEAT_MAX_BRIGHTNESS = 40;   // 0–255; subtle, not blinding
 
