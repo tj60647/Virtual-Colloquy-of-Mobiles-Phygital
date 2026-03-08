@@ -359,7 +359,10 @@ export default function Page() {
   );
 
   async function sendCommand(raw: string) {
-    const payload = `${raw.trim()}\n`;
+    // Format to one decimal place (e.g. "37.0", "-50.0") so the value is
+    // always unambiguous on the wire. Firmware accepts floats, so "37.0\n"
+    // parses identically to "37\n".
+    const payload = `${Number(raw.trim()).toFixed(1)}\n`;
     if (transportType === "serial") {
       if (!writerRef.current || sendBusyRef.current) {
         return;
@@ -431,10 +434,10 @@ export default function Page() {
     const periodMs = 1000 / DASHBOARD_DRIVE_HZ;
     const timer = window.setInterval(() => {
       const dt = periodMs / 1000;
-      const cmd = stepTrapezoid(dt);
-      const rounded = Math.round(clamp(cmd, COMMAND_MIN, COMMAND_MAX));
-      setCommandInput(String(rounded));
-      void sendCommand(String(rounded));
+      const cmd = clamp(stepTrapezoid(dt), COMMAND_MIN, COMMAND_MAX);
+      const formatted = cmd.toFixed(1);
+      setCommandInput(formatted);
+      void sendCommand(formatted);
     }, periodMs);
 
     return () => window.clearInterval(timer);
@@ -748,8 +751,8 @@ export default function Page() {
             <button className={driveMode === "manual" ? "primary" : ""} onClick={() => activateDriveMode("manual")}>Manual</button>
             <button className={driveMode === "oscillator" ? "primary" : ""} onClick={() => activateDriveMode("oscillator")}>Oscillator @ {DASHBOARD_DRIVE_HZ} Hz</button>
           </div>
-          <label className="dial-label" htmlFor="command-slider">Command ({Math.round(commandValue)})</label>
-          <input id="command-slider" type="range" min={COMMAND_MIN} max={COMMAND_MAX} step={1} value={commandValue} onChange={(e) => setCommandInput(e.target.value)} disabled={driveMode === "oscillator"} />
+          <label className="dial-label" htmlFor="command-slider">Command ({commandValue.toFixed(1)})</label>
+          <input id="command-slider" type="range" min={COMMAND_MIN} max={COMMAND_MAX} step={0.1} value={commandValue} onChange={(e) => setCommandInput(e.target.value)} disabled={driveMode === "oscillator"} />
           <div className="row" style={{ marginTop: 8, marginBottom: 10 }}>
             <input type="text" value={commandInput} onChange={(e) => setCommandInput(e.target.value)} disabled={driveMode === "oscillator"} placeholder="-100 to 100" />
             <button className="primary" disabled={!connected || driveMode === "oscillator"} onClick={() => sendCommand(commandInput)}>Send</button>
