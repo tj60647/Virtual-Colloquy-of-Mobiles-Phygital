@@ -12,8 +12,7 @@
 #include <ESP32Servo.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-
-namespace {
+#include <NimBLEDevice.h>
 
 /**
  * Module overview:
@@ -21,7 +20,8 @@ namespace {
  * - Supports a hardware switch to choose serial control vs test oscillation mode.
  * - Reads a potentiometer to scale active servo span for calibration.
  * - Drives an LS-3006 servo in open loop.
- * - Reports runtime status over Serial and optional SSD1306 OLED.
+ * - Reports runtime status over USB Serial, BLE (Nordic UART Service), and optional SSD1306 OLED.
+ * - Commands are accepted identically over USB or BLE — same protocol, same behavior.
  */
 
 /**
@@ -86,16 +86,36 @@ constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 200;
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
-constexpr float OSCILLATION_AMPLITUDE = 100.0f;
-// Oscillation speed target for bench safety/readability:
-// max angular speed ~= A * w <= 5 deg/sec, where A ~= 60 deg at full span.
-// This gives period T >= 2*pi*A/5 ~= 75.4 sec. Use 76 sec.
-constexpr float OSCILLATION_PERIOD_MS = 76000.0f;
+// Snap the displayed range bounds (rn/rx) to this increment as the user turns
+// the calibration knob. The servo itself moves continuously at full resolution.
+constexpr float RANGE_DISPLAY_STEP_DEG = 5.0f;
+
+// Trapezoidal oscillation: pointer travels between -OSCILLATION_AMPLITUDE and
+// +OSCILLATION_AMPLITUDE with a velocity-limited, acceleration-limited profile.
+// Units are command space (-100..100), so these are command-units/sec and
+// command-units/sec² respectively. With defaults of 5/5 the pointer takes
+// ~41 sec per one-way pass (1 sec accel + 39 sec coast + 1 sec decel).
+constexpr float OSCILLATION_AMPLITUDE  = 100.0f;
+constexpr float OSC_MAX_VELOCITY       = 5.0f;  // command units per second
+constexpr float OSC_MAX_ACCEL          = 5.0f;  // command units per second²
 
 enum class ControlMode {
   Serial,
   Oscillation,
 };
+
+// BLE: Nordic UART Service (NUS) — well-established convention for serial-over-BLE.
+// Two characteristics mirror the USB serial protocol exactly:
+//   RX char (host writes here)  = commands coming in
+//   TX char (device notifies)   = telemetry going out
+// The dashboard discovers the device by filtering on the NUS service UUID.
+constexpr const char* BLE_DEVICE_NAME  = "Colloquy Pointer";
+constexpr const char* NUS_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+constexpr const char* NUS_RX_CHAR_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"; // host -> device
+constexpr const char* NUS_TX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"; // device -> host
+
+NimBLECharacteristic* bleTxCharacteristic = nullptr;
+bool bleClientConnected = false;
 
 Servo pointerServo;
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);
@@ -130,6 +150,23 @@ bool potFilterInitialized = false;
  */
 int toWholeDegrees(float angleDeg) {
   return static_cast<int>(roundf(angleDeg));
+}
+
+/**
+ * Snap an angle to the nearest fixed degree increment.
+ *
+ * Used to quantize the displayed range bounds (rn/rx) so the dashboard shows
+ * clean step changes as the calibration knob is adjusted, rather than a
+ * continuous jittery float stream. The servo output angle is NOT snapped —
+ * it moves at full continuous resolution.
+ * For example, with increment=5: 92.3 -> 90, 93.0 -> 95.
+ *
+ * @param angleDeg Continuous angle value in degrees.
+ * @param increment Step size in degrees (e.g. 5).
+ * @return Angle snapped to the nearest multiple of increment.
+ */
+float snapToNearestIncrement(float angleDeg, float increment) {
+  return roundf(angleDeg / increment) * increment;
 }
 
 /**
@@ -284,42 +321,83 @@ bool tryParseCommandLine(const char* line, float* outValue) {
 }
 
 /**
- * Consume incoming serial bytes into line-buffered command frames.
+ * Process a single incoming character through the shared line buffer.
+ *
+ * Extracted so both USB serial and BLE RX paths use identical parsing logic.
+ * A command sent over BLE behaves exactly the same as one sent over USB.
  *
  * Side effects:
  * - Updates `commandedPosition` on valid parse.
  * - Updates `lastValidSerialCommandMs` to service timeout guard.
- * - Clears buffer on line completion or overflow to stay non-blocking.
+ */
+void processIncomingCharacter(char c) {
+  if (c == '\n' || c == '\r') {
+    if (serialBufferPos == 0) {
+      return;
+    }
+    serialBuffer[serialBufferPos] = '\0';
+    float parsedCommand = 0.0f;
+    if (tryParseCommandLine(serialBuffer, &parsedCommand)) {
+      commandedPosition = clampf(parsedCommand, COMMAND_MIN, COMMAND_MAX);
+      lastValidSerialCommandMs = millis();
+      serialTimeoutGuardActive = false;
+    }
+    serialBufferPos = 0;
+    serialBuffer[0] = '\0';
+    return;
+  }
+  if (serialBufferPos < (SERIAL_BUFFER_LEN - 1)) {
+    serialBuffer[serialBufferPos++] = c;
+  } else {
+    // Overflow guard: reset buffer and wait for next line.
+    serialBufferPos = 0;
+    serialBuffer[0] = '\0';
+  }
+}
+
+/**
+ * BLE server callbacks: track connection state and restart advertising on disconnect.
+ *
+ * Restarting advertising after disconnect means the dashboard can reconnect
+ * without power-cycling the device.
+ */
+class BleServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* /*server*/) override {
+    bleClientConnected = true;
+    Serial.println("BLE: dashboard connected.");
+  }
+  void onDisconnect(NimBLEServer* server) override {
+    bleClientConnected = false;
+    Serial.println("BLE: dashboard disconnected — restarting advertising.");
+    server->startAdvertising();
+  }
+};
+
+/**
+ * BLE RX characteristic callback: feed incoming bytes into the shared line buffer.
+ *
+ * BLE writes may arrive in any chunk size, so each byte is forwarded to
+ * processIncomingCharacter() which handles newline detection and parsing.
+ */
+class BleRxCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic) override {
+    const std::string data = characteristic->getValue();
+    for (const char c : data) {
+      processIncomingCharacter(c);
+    }
+  }
+};
+
+/**
+ * Consume incoming serial bytes into the shared line buffer.
+ *
+ * Side effects:
+ * - Updates `commandedPosition` on valid parse.
+ * - Updates `lastValidSerialCommandMs` to service timeout guard.
  */
 void processSerialInput() {
   while (Serial.available() > 0) {
-    const char c = static_cast<char>(Serial.read());
-
-    if (c == '\n' || c == '\r') {
-      if (serialBufferPos == 0) {
-        continue;
-      }
-
-      serialBuffer[serialBufferPos] = '\0';
-      float parsedCommand = 0.0f;
-      if (tryParseCommandLine(serialBuffer, &parsedCommand)) {
-        commandedPosition = clampf(parsedCommand, COMMAND_MIN, COMMAND_MAX);
-        lastValidSerialCommandMs = millis();
-        serialTimeoutGuardActive = false;
-      }
-
-      serialBufferPos = 0;
-      serialBuffer[0] = '\0';
-      continue;
-    }
-
-    if (serialBufferPos < (SERIAL_BUFFER_LEN - 1)) {
-      serialBuffer[serialBufferPos++] = c;
-    } else {
-      // Overflow guard: reset buffer and wait for next line.
-      serialBufferPos = 0;
-      serialBuffer[0] = '\0';
-    }
+    processIncomingCharacter(static_cast<char>(Serial.read()));
   }
 }
 
@@ -335,19 +413,74 @@ void applyServoOutput() {
   lastSpanScale = spanScale;
   expectedServoRangeFromScale(spanScale, &lastExpectedMinAngle,
                               &lastExpectedMaxAngle);
+  // Snap the range endpoints to the nearest display increment so the dashboard
+  // shows clean step changes as the knob is adjusted, not a jittery float stream.
+  lastExpectedMinAngle = snapToNearestIncrement(lastExpectedMinAngle, RANGE_DISPLAY_STEP_DEG);
+  lastExpectedMaxAngle = snapToNearestIncrement(lastExpectedMaxAngle, RANGE_DISPLAY_STEP_DEG);
+  // Servo moves at full continuous resolution — no snap on the output angle.
   appliedAngle = commandToServoAngle(commandedPosition, spanScale);
   pointerServo.write(static_cast<int>(appliedAngle));
 }
 
 /**
- * Produce a smooth test command for oscillation mode.
+ * Generate a trapezoidal motion command for oscillation test mode.
  *
- * @return Synthetic command in approximately [-OSCILLATION_AMPLITUDE, +OSCILLATION_AMPLITUDE].
+ * The pointer accelerates at OSC_MAX_ACCEL toward the current endpoint,
+ * cruises at OSC_MAX_VELOCITY, then decelerates to a stop at the endpoint
+ * before reversing. This gives clean back-and-forth motion with defined
+ * ramp-up and ramp-down behavior — easier to observe than a sine wave.
+ *
+ * State is held in static locals so it persists across loop() calls without
+ * needing global variables.
+ *
+ * @return Current command value in approximately [-OSCILLATION_AMPLITUDE, +OSCILLATION_AMPLITUDE].
  */
 float getOscillationCommand() {
-  const float phase =
-      static_cast<float>(millis()) * (2.0f * PI / OSCILLATION_PERIOD_MS);
-  return sinf(phase) * OSCILLATION_AMPLITUDE;
+  static float position  = 0.0f;
+  static float velocity  = 0.0f;
+  static float target    = OSCILLATION_AMPLITUDE;
+  static uint32_t lastMs = 0;
+
+  const uint32_t now = millis();
+  // Clamp dt to 100ms maximum to prevent large jumps after pauses or on startup.
+  const float dt = clampf(static_cast<float>(now - lastMs) * 0.001f, 0.0f, 0.1f);
+  lastMs = now;
+
+  if (dt <= 0.0f) {
+    return position;
+  }
+
+  const float distToTarget = target - position;
+  const float dirToTarget  = (distToTarget >= 0.0f) ? 1.0f : -1.0f;
+
+  // Minimum distance needed to decelerate from current speed to zero.
+  const float stoppingDist = (velocity * velocity) / (2.0f * OSC_MAX_ACCEL);
+
+  float accel;
+  if (fabsf(distToTarget) <= stoppingDist + 0.01f) {
+    // Close enough that we must start braking to hit the endpoint cleanly.
+    accel = -dirToTarget * OSC_MAX_ACCEL;
+  } else if (fabsf(velocity) < OSC_MAX_VELOCITY) {
+    // Below cruise speed — keep accelerating.
+    accel = dirToTarget * OSC_MAX_ACCEL;
+  } else {
+    // At cruise speed — coast.
+    accel = 0.0f;
+  }
+
+  velocity += accel * dt;
+  velocity  = clampf(velocity, -OSC_MAX_VELOCITY, OSC_MAX_VELOCITY);
+  position += velocity * dt;
+  position  = clampf(position, -OSCILLATION_AMPLITUDE, OSCILLATION_AMPLITUDE);
+
+  // When we arrive at the endpoint (close and nearly stopped), snap, then reverse.
+  if (fabsf(distToTarget) < 0.5f && fabsf(velocity) < 0.5f) {
+    position = target;
+    velocity = 0.0f;
+    target   = -target;
+  }
+
+  return position;
 }
 
 /**
@@ -382,8 +515,17 @@ void updateControlModeAndCommand() {
 /**
  * Emit periodic telemetry to serial monitor.
  *
- * Output fields include command, mode, guard state, potentiometer raw ADC,
- * and currently applied angle.
+ * Format: compact key=value pairs as defined in the root AGENTS.md protocol spec.
+ * Example: c=37,m=s,g=0,p=2048,a=112,rn=45,rx=135
+ *
+ * Keys:
+ *   c  = commanded position (-100..100)
+ *   m  = control mode (s=serial, o=oscillation)
+ *   g  = safety guard active (1=timeout, 0=ok)
+ *   p  = potentiometer ADC average (0..4095)
+ *   a  = applied servo angle in degrees (0..180)
+ *   rn = pot-scaled range minimum angle in degrees (0..180)
+ *   rx = pot-scaled range maximum angle in degrees (0..180)
  */
 void printStatus() {
   const uint32_t now = millis();
@@ -393,20 +535,72 @@ void printStatus() {
 
   lastStatusPrintMs = now;
 
-  Serial.print("command=");
-  Serial.print(commandedPosition, 2);
-  Serial.print(",mode=");
-  Serial.print(currentMode == ControlMode::Oscillation ? "osc" : "serial");
-  Serial.print(",guard=");
-  Serial.print(serialTimeoutGuardActive ? "timeout" : "ok");
-  Serial.print(",potRaw=");
-  Serial.print(lastPotRaw);
-  Serial.print(",rangeMinDeg=");
-  Serial.print(toWholeDegrees(lastExpectedMinAngle));
-  Serial.print(",rangeMaxDeg=");
-  Serial.print(toWholeDegrees(lastExpectedMaxAngle));
-  Serial.print(",servoAngleDeg=");
-  Serial.println(toWholeDegrees(appliedAngle));
+  // Build the telemetry frame once and route to all active transports.
+  // Using snprintf ensures the frame is a proper null-terminated string
+  // that can be sent to Serial and BLE without duplication.
+  char frame[64];
+  snprintf(frame, sizeof(frame),
+           "c=%d,m=%c,g=%d,p=%u,a=%d,rn=%d,rx=%d",
+           static_cast<int>(roundf(commandedPosition)),
+           currentMode == ControlMode::Oscillation ? 'o' : 's',
+           serialTimeoutGuardActive ? 1 : 0,
+           static_cast<unsigned int>(lastPotAverage),
+           toWholeDegrees(appliedAngle),
+           toWholeDegrees(lastExpectedMinAngle),
+           toWholeDegrees(lastExpectedMaxAngle));
+
+  Serial.println(frame);
+
+  // Notify BLE client if one is connected. Append \n so the dashboard
+  // line-split parser treats this the same as a USB serial line.
+  if (bleClientConnected && bleTxCharacteristic != nullptr) {
+    char frameNl[66];
+    snprintf(frameNl, sizeof(frameNl), "%s\n", frame);
+    bleTxCharacteristic->setValue(reinterpret_cast<uint8_t*>(frameNl), strlen(frameNl));
+    bleTxCharacteristic->notify();
+  }
+}
+
+/**
+ * Initialize BLE with Nordic UART Service (NUS).
+ *
+ * NUS emulates a serial port over BLE using two characteristics:
+ * - RX (host writes, device reads): commands
+ * - TX (device notifies host):      telemetry
+ *
+ * The device advertises by NUS UUID so the dashboard Web Bluetooth picker
+ * can filter to show only Colloquy Pointer devices.
+ * After a client disconnects, advertising restarts automatically via
+ * BleServerCallbacks::onDisconnect(), so no power cycle is needed to reconnect.
+ */
+void initBle() {
+  NimBLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEServer* server = NimBLEDevice::createServer();
+  server->setCallbacks(new BleServerCallbacks());
+
+  NimBLEService* service = server->createService(NUS_SERVICE_UUID);
+
+  // RX: host writes commands here. WRITE_NR = write without response (lower latency).
+  NimBLECharacteristic* rxChar = service->createCharacteristic(
+      NUS_RX_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
+  rxChar->setCallbacks(new BleRxCallbacks());
+
+  // TX: device sends telemetry frame notifications here.
+  bleTxCharacteristic = service->createCharacteristic(
+      NUS_TX_CHAR_UUID,
+      NIMBLE_PROPERTY::NOTIFY
+  );
+
+  service->start();
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  advertising->addServiceUUID(NUS_SERVICE_UUID);
+  advertising->start();
+
+  Serial.print("BLE initialized. Advertising as \"");
+  Serial.print(BLE_DEVICE_NAME);
+  Serial.println("\".");
 }
 
 /**
@@ -488,8 +682,6 @@ void refreshOledStatus() {
   oled.display();
 }
 
-}  // namespace
-
 /**
  * Arduino setup entry point for one-time peripheral initialization.
  */
@@ -502,6 +694,7 @@ void setup() {
   pinMode(MODE_SWITCH_PIN, INPUT_PULLUP);
 
   initOled();
+  initBle();
 
   pointerServo.setPeriodHertz(50);
   pointerServo.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);

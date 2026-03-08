@@ -31,6 +31,41 @@ Both subprojects have their own `AGENTS.md` that extends these shared rules.
 - Keep comments current when behavior changes.
 - When possible, phrase comments so non-programmers can infer system behavior.
 
+## Serial Protocol (Shared Contract)
+
+This protocol is the interface between `firmware/` and `dashboard/`. Both sides must stay in sync with this spec.
+
+### Commands — dashboard → device
+One value per line, newline-terminated. Plain integer or float in the range `-100..100`.
+```
+37\n
+-50\n
+0\n
+```
+The firmware also accepts prefixed forms (`cmd:37`, `pos=-50`) for manual Serial Monitor use.
+
+### Telemetry — device → dashboard
+Compact comma-separated key=value pairs, one frame per line, newline-terminated.
+```
+c=37,m=s,g=0,p=2048,a=112,rn=45,rx=135\n
+```
+
+| Key | Field | Values / Units |
+|-----|-------|----------------|
+| `c` | commanded position | -100..100 |
+| `m` | control mode | `s` = serial, `o` = oscillation |
+| `g` | safety guard active | `1` = timeout/guard active, `0` = ok |
+| `p` | potentiometer ADC average | 0..4095 |
+| `a` | applied servo angle | degrees (0..180) |
+| `rn` | range minimum angle (pot-scaled) | degrees (0..180) |
+| `rx` | range maximum angle (pot-scaled) | degrees (0..180) |
+
+### Parsing rules
+- Split each line on `,` to get key=value pairs.
+- Split each pair on `=` to get key and value.
+- Ignore any line that does not match the pattern (startup banners, OLED messages, etc.).
+- All values are numeric except `m` which is a single character string.
+
 ## Scope Priority
 - Prioritize proving behavior over architecture purity.
 - Add abstractions only when repetition or complexity justifies them.

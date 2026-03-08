@@ -2,14 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+// Short keys match the compact telemetry protocol defined in the root AGENTS.md.
 type Telemetry = {
-  command?: string;
-  mode?: string;
-  guard?: string;
-  potRaw?: string;
-  rangeMinDeg?: string;
-  rangeMaxDeg?: string;
-  servoAngleDeg?: string;
+  c?: string;   // commanded position
+  m?: string;   // mode (s=serial, o=oscillation)
+  g?: string;   // guard active (1=timeout, 0=ok)
+  p?: string;   // potentiometer ADC average
+  a?: string;   // applied servo angle (degrees)
+  rn?: string;  // range minimum angle (degrees)
+  rx?: string;  // range maximum angle (degrees)
 };
 
 type ConnectErrorInfo = {
@@ -25,6 +26,13 @@ const SERIAL_PORT_FILTERS = [
   { usbVendorId: 0x1a86 },
   { usbVendorId: 0x0403 }
 ];
+
+// Nordic UART Service (NUS) — standard BLE serial emulation UUIDs.
+// The firmware advertises this service; the dashboard filters on it so
+// only Colloquy Pointer devices appear in the browser picker.
+const NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // browser → device
+const NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // device → browser (notify)
 
 const COMMAND_MIN = -100;
 const COMMAND_MAX = 100;
@@ -82,6 +90,32 @@ function explainConnectError(error: unknown): ConnectErrorInfo {
   }
 
   return { summary: `Connect failed: ${error.message}`, tips: fallback.tips };
+}
+
+function explainBleConnectError(error: unknown): ConnectErrorInfo {
+  const fallback: ConnectErrorInfo = {
+    summary: "Bluetooth connection failed.",
+    tips: [
+      "Make sure the device is powered on and advertising.",
+      "Use Chrome or Edge on a supported platform.",
+      "Confirm the page is served over HTTPS or localhost."
+    ]
+  };
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+  const msg = (error.message || "").toLowerCase();
+  const name = (error.name || "").toLowerCase();
+  if (name.includes("notfound") || msg.includes("user cancelled")) {
+    return { summary: "Bluetooth picker was closed.", tips: ["Select the Colloquy Pointer device and try again."] };
+  }
+  if (name.includes("security") || msg.includes("secure context")) {
+    return { summary: "Browser blocked Web Bluetooth.", tips: ["Use Chrome/Edge on https:// or localhost."] };
+  }
+  if (msg.includes("gatt")) {
+    return { summary: "GATT connection failed.", tips: ["Device may already be connected elsewhere. Power cycle the device and retry."] };
+  }
+  return { summary: `Bluetooth failed: ${error.message}`, tips: fallback.tips };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -195,7 +229,9 @@ function buildTrapezoidProfilePoints(amplitude: number, maxVel: number, maxAccel
 
 export default function Page() {
   const [supported, setSupported] = useState(false);
+  const [bleSupported, setBleSupported] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [transportType, setTransportType] = useState<"serial" | "ble" | null>(null);
   const [status, setStatus] = useState("Disconnected");
   const [connectTips, setConnectTips] = useState<string[]>([]);
   const [commandInput, setCommandInput] = useState("0");
@@ -212,6 +248,9 @@ export default function Page() {
   const portRef = useRef<any>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const writerRef = useRef<WritableStreamDefaultWriter<Uint8Array> | null>(null);
+  // BLE refs — hold references to the connected GATT device and characteristics.
+  const bleDeviceRef = useRef<BluetoothDevice | null>(null);
+  const bleRxCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
   const driveTimeRef = useRef(0);
   const trapPositionRef = useRef(0);
   const trapVelocityRef = useRef(0);
@@ -220,13 +259,15 @@ export default function Page() {
 
   useEffect(() => {
     setSupported(Boolean(navigator.serial));
+    setBleSupported(Boolean(navigator.bluetooth));
   }, []);
 
-  const guardBadgeClass = useMemo(() => (telemetry.guard === "timeout" ? "badge warn" : "badge ok"), [telemetry.guard]);
+  // g=1 means guard/timeout active; g=0 means ok.
+  const guardBadgeClass = useMemo(() => (telemetry.g === "1" ? "badge warn" : "badge ok"), [telemetry.g]);
 
-  const rangeMinDeg = useMemo(() => toNumber(telemetry.rangeMinDeg, 0), [telemetry.rangeMinDeg]);
-  const rangeMaxDeg = useMemo(() => toNumber(telemetry.rangeMaxDeg, 180), [telemetry.rangeMaxDeg]);
-  const currentAngleDeg = useMemo(() => toNumber(telemetry.servoAngleDeg, 90), [telemetry.servoAngleDeg]);
+  const rangeMinDeg = useMemo(() => toNumber(telemetry.rn, 0), [telemetry.rn]);
+  const rangeMaxDeg = useMemo(() => toNumber(telemetry.rx, 180), [telemetry.rx]);
+  const currentAngleDeg = useMemo(() => toNumber(telemetry.a, 90), [telemetry.a]);
   const commandValue = useMemo(() => clamp(toNumber(commandInput, 0), COMMAND_MIN, COMMAND_MAX), [commandInput]);
 
   const previewAngleDeg = useMemo(() => {
@@ -256,14 +297,27 @@ export default function Page() {
   );
 
   async function sendCommand(raw: string) {
-    if (!writerRef.current || sendBusyRef.current) {
-      return;
-    }
-    sendBusyRef.current = true;
-    try {
-      await writerRef.current.write(new TextEncoder().encode(`${raw.trim()}\n`));
-    } finally {
-      sendBusyRef.current = false;
+    const payload = `${raw.trim()}\n`;
+    if (transportType === "serial") {
+      if (!writerRef.current || sendBusyRef.current) {
+        return;
+      }
+      sendBusyRef.current = true;
+      try {
+        await writerRef.current.write(new TextEncoder().encode(payload));
+      } finally {
+        sendBusyRef.current = false;
+      }
+    } else if (transportType === "ble") {
+      if (!bleRxCharRef.current || sendBusyRef.current) {
+        return;
+      }
+      sendBusyRef.current = true;
+      try {
+        await bleRxCharRef.current.writeValueWithoutResponse(new TextEncoder().encode(payload));
+      } finally {
+        sendBusyRef.current = false;
+      }
     }
   }
 
@@ -342,8 +396,9 @@ export default function Page() {
 
       readerRef.current = port.readable.getReader();
       writerRef.current = port.writable.getWriter();
+      setTransportType("serial");
       setConnected(true);
-      setStatus("Connected at 115200 baud");
+      setStatus("Connected via USB at 115200 baud");
 
       const decoder = new TextDecoder();
       let buffer = "";
@@ -370,26 +425,99 @@ export default function Page() {
       setStatus(info.summary);
       setConnectTips(info.tips);
       setConnected(false);
+      setTransportType(null);
+    }
+  }
+
+  async function connectBle() {
+    if (!navigator.bluetooth) {
+      setStatus("Web Bluetooth unavailable in this browser context");
+      return;
+    }
+    try {
+      setConnectTips([]);
+      setStatus("Opening Bluetooth picker...");
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS_SERVICE_UUID] }],
+        optionalServices: [NUS_SERVICE_UUID]
+      });
+      bleDeviceRef.current = device;
+      setStatus("Connecting via Bluetooth...");
+      const server = await device.gatt!.connect();
+      const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+      const txChar = await service.getCharacteristic(NUS_TX_CHAR_UUID);
+      const rxChar = await service.getCharacteristic(NUS_RX_CHAR_UUID);
+      bleRxCharRef.current = rxChar;
+
+      // Subscribe to telemetry notifications from the device.
+      // BLE notifications may not align with newline boundaries, so buffer
+      // partial frames the same way as the serial reader.
+      await txChar.startNotifications();
+      let bleBuffer = "";
+      txChar.addEventListener("characteristicvaluechanged", (event) => {
+        const char = event.target as BluetoothRemoteGATTCharacteristic;
+        const text = new TextDecoder().decode(char.value ?? new DataView(new ArrayBuffer(0)));
+        bleBuffer += text;
+        const lines = bleBuffer.split(/\r?\n/);
+        bleBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          setLastLine(line);
+          setTelemetry(parseTelemetry(line));
+          setHistory((prev) => [line, ...prev].slice(0, 120));
+          setLastRxAt(new Date().toLocaleTimeString());
+        }
+      });
+
+      device.addEventListener("gattserverdisconnected", () => {
+        bleDeviceRef.current = null;
+        bleRxCharRef.current = null;
+        setConnected(false);
+        setTransportType(null);
+        setStatus("Bluetooth disconnected");
+      });
+
+      setTransportType("ble");
+      setConnected(true);
+      setStatus(`Connected via Bluetooth — ${device.name ?? "Colloquy Pointer"}`);
+    } catch (error) {
+      const info = explainBleConnectError(error);
+      setStatus(info.summary);
+      setConnectTips(info.tips);
+      setConnected(false);
+      setTransportType(null);
     }
   }
 
   async function disconnect() {
-    try {
-      await readerRef.current?.cancel();
-      readerRef.current?.releaseLock();
-      writerRef.current?.releaseLock();
-      await portRef.current?.close();
-    } catch {
-      // Ignore cleanup errors.
-    } finally {
-      readerRef.current = null;
-      writerRef.current = null;
-      portRef.current = null;
-      setConnected(false);
-      setStatus("Disconnected");
-      setConnectTips([]);
-      driveTimeRef.current = 0;
+    if (transportType === "ble") {
+      try {
+        bleDeviceRef.current?.gatt?.disconnect();
+      } catch {
+        // Ignore cleanup errors.
+      } finally {
+        bleDeviceRef.current = null;
+        bleRxCharRef.current = null;
+      }
+    } else {
+      try {
+        await readerRef.current?.cancel();
+        readerRef.current?.releaseLock();
+        writerRef.current?.releaseLock();
+        await portRef.current?.close();
+      } catch {
+        // Ignore cleanup errors.
+      } finally {
+        readerRef.current = null;
+        writerRef.current = null;
+        portRef.current = null;
+      }
     }
+    setConnected(false);
+    setTransportType(null);
+    setStatus("Disconnected");
+    setConnectTips([]);
+    driveTimeRef.current = 0;
   }
 
   function activateDriveMode(next: DashboardDriveMode) {
@@ -414,11 +542,18 @@ export default function Page() {
           <section className="card panel-tight">
             <h2>1) Connection</h2>
             <div className="row" style={{ marginBottom: 8 }}>
-              <button className="primary" onClick={connect} disabled={!supported || connected}>Connect</button>
+              <button className="primary" onClick={connect} disabled={!supported || connected} title="Connect via USB cable">
+                USB Connect
+              </button>
+              <button className="primary" onClick={connectBle} disabled={!bleSupported || connected} title="Connect via Bluetooth (BLE)">
+                Bluetooth Connect
+              </button>
               <button onClick={disconnect} disabled={!connected}>Disconnect</button>
             </div>
             <div className={connected ? "badge ok" : "badge warn"}>{status}</div>
-            {!supported && <p style={{ marginTop: 8 }}>WebSerial needs Chromium on localhost/https.</p>}
+            {!supported && !bleSupported && <p style={{ marginTop: 8 }}>WebSerial and Web Bluetooth both need Chromium on localhost/https.</p>}
+            {!supported && bleSupported && <p style={{ marginTop: 8 }}>USB requires Chromium. Bluetooth is available.</p>}
+            {supported && !bleSupported && <p style={{ marginTop: 8 }}>Bluetooth requires Chromium. USB is available.</p>}
             {connectTips.length > 0 && (
               <div style={{ marginTop: 8 }}>
                 {connectTips.slice(0, 2).map((tip, index) => (
@@ -431,12 +566,12 @@ export default function Page() {
           <section className="card panel-tight">
             <h2>2) Streaming Data</h2>
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
-            <div className="kv"><span>mode</span><code>{telemetry.mode ?? "-"}</code></div>
-            <div className="kv"><span>guard</span><span className={guardBadgeClass}>{telemetry.guard ?? "n/a"}</span></div>
-            <div className="kv"><span>command</span><code>{telemetry.command ?? "-"}</code></div>
+            <div className="kv"><span>mode</span><code>{telemetry.m === "o" ? "oscillation" : telemetry.m === "s" ? "serial" : "-"}</code></div>
+            <div className="kv"><span>guard</span><span className={guardBadgeClass}>{telemetry.g === "1" ? "timeout" : telemetry.g === "0" ? "ok" : "n/a"}</span></div>
+            <div className="kv"><span>command</span><code>{telemetry.c ?? "-"}</code></div>
             <div className="kv"><span>servo angle</span><code>{Math.round(currentAngleDeg)} deg</code></div>
             <div className="kv"><span>range</span><code>{Math.round(rangeMinDeg)} to {Math.round(rangeMaxDeg)} deg</code></div>
-            <div className="kv"><span>potRaw</span><code>{telemetry.potRaw ?? "-"}</code></div>
+            <div className="kv"><span>pot ADC</span><code>{telemetry.p ?? "-"}</code></div>
             <div className="log log-small" style={{ marginTop: 8 }}>{lastLine}</div>
           </section>
 

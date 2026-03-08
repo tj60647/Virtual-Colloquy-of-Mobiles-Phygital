@@ -190,6 +190,37 @@ If you later add these files, link them from this section for instructor review.
 - Keep all grounds common (ESP32 GND + servo supply GND).
 - If the servo buzzes or strains at endpoints, stop and reduce range.
 
+## Design Context: Pan-Servo Camera Tracking
+
+This is a classic pan-servo camera tracking problem.
+
+The intended use case:
+- A webcam observes a scene.
+- A detected object or point of interest has a known horizontal pixel position within the frame.
+- The servo rotates a physical pointer to aim at that position in real space.
+
+### Why commands use a normalized -100..100 range
+
+The dashboard knows pixel coordinates. The firmware knows servo angles. Neither side needs to know the other's units if we agree on a normalized intermediate format:
+
+```
+pixelX (0..frameWidth)
+  → dashboard normalizes to -100..100
+  → firmware maps to servo angle via pot calibration
+  → servo points at that horizontal position in the scene
+```
+
+This design means:
+- The **dashboard** only needs to know frame width. It never deals with servo angles, pulse widths, or physical travel limits.
+- The **firmware** only needs to know how to move the servo. It never deals with pixel math or camera geometry.
+- The **potentiometer** acts as a live calibration knob: turning it narrows or widens the physical arc the servo uses to cover the full frame. This lets you match the servo's sweep to the camera's actual field of view without changing any code.
+
+### Why you don't need to know the camera's FOV
+
+If the goal is "servo points where the object appears in the frame," the FOV value is not required. The pot calibration makes the correspondence implicit: adjust the pot until the pointer tracks correctly across the scene. The physical angle mapping is absorbed into the calibration rather than computed analytically.
+
+FOV math would only be necessary if you needed angular position in world space (e.g. "the target is 15° left of center in the room") — which is not a goal here.
+
 ## Firmware Architecture
 The project currently uses a single main module:
 - `firmware/src/main.cpp`

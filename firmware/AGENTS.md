@@ -5,7 +5,7 @@ Extends the root `AGENTS.md`. These rules apply when working inside the `firmwar
 ## Stack
 - Language: C++ (Arduino framework)
 - Platform: PlatformIO, target board `adafruit_feather_esp32_v2`
-- Key libraries: `ESP32Servo`, `Adafruit GFX`, `Adafruit SSD1306`
+- Key libraries: `ESP32Servo`, `Adafruit GFX`, `Adafruit SSD1306`, `NimBLE-Arduino`
 
 ## File Header Convention
 Add this header at the top of every new `.cpp` or `.h` file:
@@ -54,10 +54,19 @@ Add this header at the top of every new `.cpp` or `.h` file:
 - OLED references: `firmware/docs/gm12864-oled-module.md`, expected address `0x3C` (alternate `0x3D`).
 - For `adafruit_feather_esp32_v2`, use board I2C defaults (`SDA=22`, `SCL=20`) and prefer pin labels `SDA`/`SCL` over raw GPIO numbers in docs and code.
 
-## Serial Protocol Guidance
-- Use newline-terminated command frames for easy testing.
-- During prototype stage, accept plain numeric commands first.
-- Expand protocol only after baseline control path is stable.
+## Serial Protocol
+See the **Serial Protocol (Shared Contract)** section in the root `AGENTS.md`. Firmware must emit telemetry and accept commands in exactly that format.
+
+## BLE Transport
+- Library: `h2zero/NimBLE-Arduino` (lighter than the default ESP32 BLE stack).
+- Service: Nordic UART Service (NUS) — emulates a serial port over BLE so no protocol changes are needed.
+- Device advertising name: `"Colloquy Pointer"` — used to identify the device in the Web Bluetooth picker.
+- NUS Service UUID: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
+- RX characteristic (host → device, write): `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
+- TX characteristic (device → host, notify): `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
+- USB serial and BLE operate simultaneously; telemetry is broadcast to both transports.
+- Advertising restarts automatically on client disconnect (no power cycle needed to reconnect).
+- `processIncomingCharacter(char c)` is the shared command parser — both serial and BLE RX paths call it, so command behavior is identical on both transports.
 
 ## Validation Workflow
 1. Build with `pio run` from inside `firmware/`.
