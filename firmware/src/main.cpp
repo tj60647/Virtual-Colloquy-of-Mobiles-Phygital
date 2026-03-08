@@ -93,12 +93,15 @@ constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 // the calibration knob. The servo itself moves continuously at full resolution.
 constexpr float RANGE_DISPLAY_STEP_DEG = 5.0f;
 
-// Second-stage IIR exponential moving average (EMA) applied on top of the
-// box (running-average) filter. Lower alpha = smoother output but slower
-// response to deliberate knob turns. 0.08 gives roughly a 0.8 s settling
-// time. The two-stage approach handles fast spike noise (box filter) AND
-// the slow RF-coupled drift from the BLE radio that survives the box stage.
-constexpr float POT_EMA_ALPHA = 0.08f;
+// EMA time constant in microseconds (125 ms).
+// The ADC is sampled every loop iteration — thousands of times per second —
+// so the filter accumulates many samples, but the alpha applied each update
+// is proportional to the actual elapsed time between calls. This means the
+// settling time is always 125 ms of real wall-clock regardless of loop speed
+// or BLE stack preemption. A deliberate knob turn takes 300+ ms, so the
+// filter follows intentional changes while rejecting noise bursts.
+// alpha per update = dt_us / (POT_EMA_TAU_US + dt_us)
+constexpr float POT_EMA_TAU_US = 125000.0f;
 
 // Hysteresis margin applied around each snap boundary. Without this a
 // filtered reading hovering within 1 ADC count of a 5-degree boundary
@@ -165,7 +168,9 @@ float lastExpectedMaxAngle = SERVO_MAX_ANGLE;
 uint32_t lastStatusPrintMs = 0;
 uint32_t lastOledRefreshMs = 0;
 uint32_t lastHeartbeatMs   = 0;
+uint32_t lastPotEmaUs      = 0;  // micros() timestamp of last EMA update
 uint32_t lastValidSerialCommandMs = 0;
+int      lastAppliedServoAngle = -1; // tracks last integer angle sent to servo; -1 forces first write
 ControlMode currentMode = ControlMode::Serial;
 bool oledAvailable = false;
 uint8_t oledAddress = 0;
@@ -273,12 +278,22 @@ float normalizedFromCommand(float commandValue) {
  *
  * Two-stage filter pipeline:
  *   Stage 1 — box (running-average) filter over POT_RUNNING_AVERAGE_SAMPLES.
- *             Removes fast, sample-to-sample ADC jitter.
- *   Stage 2 — exponential moving average (IIR) with alpha = POT_EMA_ALPHA.
- *             Removes slower RF-coupled drift from the BLE radio that
- *             outlasts the box filter window.
+ *             Fast spike rejection: removes sample-to-sample ADC jitter and
+ *             short BLE radio noise bursts that last less than the box window.
+ *   Stage 2 — time-based exponential moving average (EMA).
+ *             Settling time is always POT_EMA_TAU_US (125 ms) of real
+ *             wall-clock time. Alpha is recomputed each call as:
+ *               alpha = dt_us / (POT_EMA_TAU_US + dt_us)
+ *             This is a first-order approximation of 1 - e^(-dt/tau) and
+ *             gives the correct time constant regardless of loop speed.
+ *             If dt is zero (same microsecond as last call), the EMA is
+ *             skipped for that sample to avoid a divide-by-zero alpha of 0.
  *
- * lastPotRaw is preserved as the unfiltered sample for debug telemetry (pr=).
+ * Called every loop() iteration so the filter accumulates the maximum
+ * number of ADC samples — thousands per second — giving it real data to
+ * work with over the full 125 ms time window.
+ *
+ * lastPotRaw is written before filtering for debug telemetry (pr=).
  * lastPotAverage holds the stage-1 box output.
  * lastPotEma holds the stage-2 EMA output — this value drives the servo.
  *
@@ -298,6 +313,7 @@ float readCalibrationSpanScale() {
     potFilterIndex = 0;
     lastPotAverage = potRaw;
     lastPotEma     = static_cast<float>(potRaw);
+    lastPotEmaUs   = micros();
   } else {
     // Stage 1: box filter — slide the window forward.
     potFilterSum -= potFilterBuffer[potFilterIndex];
@@ -308,9 +324,17 @@ float readCalibrationSpanScale() {
         static_cast<uint16_t>(potFilterSum / POT_RUNNING_AVERAGE_SAMPLES);
     lastPotAverage = boxAvg;
 
-    // Stage 2: EMA on top of the box average.
-    lastPotEma = lastPotEma * (1.0f - POT_EMA_ALPHA) +
-                 static_cast<float>(boxAvg) * POT_EMA_ALPHA;
+    // Stage 2: time-based EMA.
+    // alpha = dt_us / (tau_us + dt_us) so the time constant is exactly
+    // POT_EMA_TAU_US of real time regardless of loop rate.
+    const uint32_t nowUs = micros();
+    const float    dtUs  = static_cast<float>(nowUs - lastPotEmaUs);
+    if (dtUs > 0.0f) {
+      lastPotEmaUs = nowUs;
+      const float alpha = dtUs / (POT_EMA_TAU_US + dtUs);
+      lastPotEma = lastPotEma * (1.0f - alpha) +
+                   static_cast<float>(boxAvg) * alpha;
+    }
   }
 
   const float unit     = lastPotEma / 4095.0f;
@@ -461,16 +485,19 @@ void processSerialInput() {
 }
 
 /**
- * Apply the current command to the servo after calibration mapping.
+ * Sample the potentiometer every loop and update the cached span-scale and
+ * snapped range bounds.
+ *
+ * Sampling every loop maximises the number of ADC readings fed into the
+ * two-stage filter, giving it the most data to work with across the full
+ * 125 ms EMA time window. The filter output changes slowly by design —
+ * the CPU cost of a single analogRead() per loop iteration is acceptable.
  *
  * Side effects:
- * - Reads current potentiometer value.
- * - Updates `appliedAngle` and writes to servo driver.
+ * - Calls readCalibrationSpanScale() which advances the box filter and EMA.
+ * - Updates lastSpanScale, lastExpectedMinAngle, lastExpectedMaxAngle.
  */
-void applyServoOutput() {
-  // Capture previous snapped values before they are overwritten by
-  // expectedServoRangeFromScale(). snapWithHysteresis() needs them to know
-  // which bucket we are currently committed to.
+void updatePotSample() {
   const float prevSnappedMin = lastExpectedMinAngle;
   const float prevSnappedMax = lastExpectedMaxAngle;
 
@@ -478,19 +505,39 @@ void applyServoOutput() {
   lastSpanScale = spanScale;
   expectedServoRangeFromScale(spanScale, &lastExpectedMinAngle,
                               &lastExpectedMaxAngle);
-  // Snap with hysteresis: quantizes noise AND prevents boundary toggling.
-  // The servo and all downstream logic use these snapped values.
   lastExpectedMinAngle = snapWithHysteresis(lastExpectedMinAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMin);
   lastExpectedMaxAngle = snapWithHysteresis(lastExpectedMaxAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMax);
+}
 
-  // Derive the applied angle from the snapped bounds, not from raw spanScale.
+/**
+ * Apply the current command to the servo using cached span-scale.
+ *
+ * Runs every loop() iteration for responsive command tracking, but skips
+ * the servo.write() call when the integer target angle has not changed.
+ * This avoids redundant PWM pulse updates and reduces I2C/servo bus chatter.
+ *
+ * Side effects:
+ * - Updates appliedAngle.
+ * - Calls pointerServo.write() only when integer angle changes.
+ */
+void applyServoOutput() {
+  // Derive the applied angle from the snapped bounds cached by updatePotSample().
   // This keeps the servo output consistent with what rn/rx report.
   const float snappedCenter   = (lastExpectedMinAngle + lastExpectedMaxAngle) * 0.5f;
   const float snappedHalfSpan = (lastExpectedMaxAngle - lastExpectedMinAngle) * 0.5f;
   const float normalized      = normalizedFromCommand(commandedPosition);
   appliedAngle = clampf(snappedCenter + normalized * snappedHalfSpan,
                         SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-  pointerServo.write(static_cast<int>(appliedAngle));
+
+  // Only push a new pulse to the servo when the output angle has actually
+  // changed.  servo.write() is not free — it triggers a PWM recalculation
+  // and the servo motor will twitch on any change, so suppressing identical
+  // writes prevents buzzing and saves a little CPU.
+  const int targetAngle = static_cast<int>(appliedAngle);
+  if (targetAngle != lastAppliedServoAngle) {
+    pointerServo.write(targetAngle);
+    lastAppliedServoAngle = targetAngle;
+  }
 }
 
 /**
@@ -828,8 +875,22 @@ void setup() {
 void loop() {
   processSerialInput();
   updateControlModeAndCommand();
-  applyServoOutput();
+  updatePotSample();    // every loop — feeds ADC samples into the 125 ms EMA window
+  applyServoOutput();   // every loop, but servo.write() only on angle change
   printStatus();
   refreshOledStatus();
   updateHeartbeat();
+
+  // Debug: print loop iterations per second to Serial once per second.
+  // Remove this block once loop rate is confirmed — it adds a Serial.print()
+  // call which itself takes ~10 µs and slightly skews the measurement.
+  static uint32_t dbgCount = 0;
+  static uint32_t dbgLastMs = 0;
+  ++dbgCount;
+  if (millis() - dbgLastMs >= 1000) {
+    Serial.print("loop/sec: ");
+    Serial.println(dbgCount);
+    dbgCount = 0;
+    dbgLastMs = millis();
+  }
 }
