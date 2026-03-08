@@ -12,6 +12,7 @@ type Telemetry = {
   a?: string;   // applied servo angle (degrees)
   rn?: string;  // range minimum angle (degrees)
   rx?: string;  // range maximum angle (degrees)
+  fv?: string;  // firmware version string (e.g. "0.1.0")
 };
 
 type ConnectErrorInfo = {
@@ -682,6 +683,7 @@ export default function Page() {
           <section className="card panel-tight">
             <h2>2) Streaming Data</h2>
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
+            <div className="kv"><span>firmware</span><code>{telemetry.fv ?? "-"}</code></div>
             {connected && stale && (
               <div className="badge warn" style={{ marginBottom: 4 }}>no data — device may be frozen</div>
             )}

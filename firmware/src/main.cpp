@@ -98,6 +98,10 @@ constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 //   - All millis()-gated tasks (telemetry, OLED, heartbeat) fire more evenly.
 constexpr uint32_t LOOP_TICK_US = 1000;
 
+// Human-readable firmware version shown on the OLED and startup banner.
+// Increment manually when behaviour-changing changes are flashed.
+constexpr char FIRMWARE_VERSION[] = "0.1.0";
+
 // Snap the displayed range bounds (rn/rx) to this increment as the user turns
 // the calibration knob. The servo itself moves continuously at full resolution.
 constexpr float RANGE_DISPLAY_STEP_DEG = 5.0f;
@@ -138,7 +142,7 @@ constexpr float OSC_MAX_ACCEL          = 5.0f;  // command units per second²
 #endif
 constexpr uint32_t HEARTBEAT_INTERVAL_MS    = 50;   // 20 Hz update — clean divisor of 1000 ms
 constexpr uint32_t HEARTBEAT_PERIOD_MS      = 3000; // one full breathe cycle
-constexpr uint8_t  HEARTBEAT_MAX_BRIGHTNESS = 40;   // 0–255; subtle, not blinding
+constexpr uint8_t  HEARTBEAT_MAX_BRIGHTNESS = 20;   // 0–255; subtle, not blinding
 
 Adafruit_NeoPixel neoPixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
 
@@ -665,11 +669,11 @@ void printStatus() {
   // Build the telemetry frame once and route to all active transports.
   // Using snprintf ensures the frame is a proper null-terminated string
   // that can be sent to Serial and BLE without duplication.
-  // Frame budget check (buffer is 80 bytes):
-  // c=-100,m=o,g=1,p=4095,pr=4095,a=180,rn=180,rx=180 = ~52 chars + null = 53
-  char frame[80];
+  // Frame budget check (buffer is 96 bytes):
+  // c=-100,m=o,g=1,p=4095,pr=4095,a=180,rn=180,rx=180,fv=0.1.0 = ~62 chars + null = 63
+  char frame[96];
   snprintf(frame, sizeof(frame),
-           "c=%d,m=%c,g=%d,p=%u,pr=%u,a=%d,rn=%d,rx=%d",
+           "c=%d,m=%c,g=%d,p=%u,pr=%u,a=%d,rn=%d,rx=%d,fv=%s",
            static_cast<int>(roundf(commandedPosition)),
            currentMode == ControlMode::Oscillation ? 'o' : 's',
            serialTimeoutGuardActive ? 1 : 0,
@@ -677,14 +681,15 @@ void printStatus() {
            static_cast<unsigned int>(lastPotRaw),  // raw ADC — debug: compare to p to see noise
            toWholeDegrees(appliedAngle),
            toWholeDegrees(lastExpectedMinAngle),
-           toWholeDegrees(lastExpectedMaxAngle));
+           toWholeDegrees(lastExpectedMaxAngle),
+           FIRMWARE_VERSION);
 
   Serial.println(frame);
 
   // Notify BLE client if one is connected. Append \n so the dashboard
   // line-split parser treats this the same as a USB serial line.
   if (bleClientConnected && bleTxCharacteristic != nullptr) {
-    char frameNl[82];
+    char frameNl[98];
     snprintf(frameNl, sizeof(frameNl), "%s\n", frame);
     bleTxCharacteristic->setValue(reinterpret_cast<uint8_t*>(frameNl), strlen(frameNl));
     bleTxCharacteristic->notify();
@@ -761,6 +766,8 @@ void initOled() {
   oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 0);
   oled.println("Virtual Colloquy");
+  oled.print("fw v");
+  oled.println(FIRMWARE_VERSION);
   oled.println("OLED online");
   oled.print("I2C 0x");
   oled.println(oledAddress, HEX);
@@ -791,6 +798,8 @@ void refreshOledStatus() {
   oled.clearDisplay();
   oled.setCursor(0, 0);
   oled.println("Virtual Colloquy");
+  oled.print("fw v");
+  oled.println(FIRMWARE_VERSION);
 
   oled.print("Control mode: ");
   oled.println(currentMode == ControlMode::Oscillation ? "osc" : "serial");
