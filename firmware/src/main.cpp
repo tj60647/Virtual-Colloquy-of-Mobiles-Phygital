@@ -89,6 +89,15 @@ constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
+// Fixed loop tick rate: 1 kHz (1 ms floor per iteration).
+// The spin-wait at the top of loop() ensures a minimum period between
+// iterations. Benefits:
+//   - EMA dt is always ≥ 1 ms, so the 125 ms time constant is predictable.
+//   - The BLE FreeRTOS task gets scheduled during the idle spin window
+//     instead of preempting mid-analogRead, keeping ADC timing clean.
+//   - All millis()-gated tasks (telemetry, OLED, heartbeat) fire more evenly.
+constexpr uint32_t LOOP_TICK_US = 1000;
+
 // Snap the displayed range bounds (rn/rx) to this increment as the user turns
 // the calibration knob. The servo itself moves continuously at full resolution.
 constexpr float RANGE_DISPLAY_STEP_DEG = 5.0f;
@@ -867,23 +876,34 @@ void setup() {
 }
 
 /**
- * Arduino main loop entry point.
+ * Arduino main loop entry point — runs at a fixed 1 kHz tick rate.
  *
- * Keeps work non-blocking by handling input, mode resolution, output update,
- * and periodic telemetry each pass.
+ * The spin-wait floor at the top paces the loop to exactly 1 ms minimum
+ * per iteration. Work non-blocking: each subsystem checks its own timer
+ * and returns immediately if it is not yet due.
  */
 void loop() {
+  // Spin-wait until at least LOOP_TICK_US have elapsed since the last tick.
+  // Spinning (rather than delay/vTaskDelay) keeps jitter under ~10 µs.
+  // The BLE FreeRTOS task is higher priority and will preempt during the
+  // spin naturally, which is the desired behaviour — it gets its CPU time
+  // without interrupting ADC or servo work mid-task.
+  static uint32_t lastTickUs = 0;
+  while (micros() - lastTickUs < LOOP_TICK_US) { /* spin */ }
+  lastTickUs = micros();
+
   processSerialInput();
   updateControlModeAndCommand();
-  updatePotSample();    // every loop — feeds ADC samples into the 125 ms EMA window
-  applyServoOutput();   // every loop, but servo.write() only on angle change
+  updatePotSample();    // every tick — feeds ADC samples into the 125 ms EMA window
+  applyServoOutput();   // every tick, but servo.write() only on angle change
   printStatus();
   refreshOledStatus();
   updateHeartbeat();
 
-  // Debug: print loop iterations per second to Serial once per second.
-  // Remove this block once loop rate is confirmed — it adds a Serial.print()
-  // call which itself takes ~10 µs and slightly skews the measurement.
+  // Debug: count confirmed ticks per second. With the 1 kHz floor this
+  // should read ~1000 when no BLE client is connected, and somewhat lower
+  // when BLE is active and the stack takes some tick slots.
+  // Remove once loop rate is confirmed.
   static uint32_t dbgCount = 0;
   static uint32_t dbgLastMs = 0;
   ++dbgCount;
