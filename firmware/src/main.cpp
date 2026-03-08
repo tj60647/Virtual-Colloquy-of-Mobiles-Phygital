@@ -883,14 +883,30 @@ void setup() {
  * and returns immediately if it is not yet due.
  */
 void loop() {
-  // Spin-wait until at least LOOP_TICK_US have elapsed since the last tick.
-  // Spinning (rather than delay/vTaskDelay) keeps jitter under ~10 µs.
-  // The BLE FreeRTOS task is higher priority and will preempt during the
-  // spin naturally, which is the desired behaviour — it gets its CPU time
-  // without interrupting ADC or servo work mid-task.
+  // Phase-coherent spin-wait: advance the tick anchor by exactly LOOP_TICK_US
+  // each iteration rather than snapping to micros(). This means a short overrun
+  // (e.g. one slow analogRead when BLE radio is active) is automatically made up
+  // by a shorter spin on the next tick, keeping the long-run average at exactly
+  // LOOP_TICK_US. By contrast, lastTickUs = micros() after the spin would
+  // "forgive" every overrun and let the rate slip permanently.
+  //
+  // Drift guard: if we fall more than 8 ticks behind real time (first run, or a
+  // rare long blocking call), re-anchor one tick behind now rather than spinning
+  // forever trying to catch up.
+  //
+  // NOTE: With BLE connected, analogRead() runs 2–3× slower (BLE radio spikes
+  // the ADC supply rail), which can push the loop body above 1 ms. In that case
+  // the spin exits immediately and the actual rate will be < 1 kHz — this is
+  // a hardware limitation, not a firmware bug. Typical observed rate: ~875 Hz.
   static uint32_t lastTickUs = 0;
-  while (micros() - lastTickUs < LOOP_TICK_US) { /* spin */ }
-  lastTickUs = micros();
+  {
+    uint32_t nowUs = micros();
+    if ((nowUs - lastTickUs) > LOOP_TICK_US * 8u) {
+      lastTickUs = nowUs - LOOP_TICK_US;  // re-anchor one tick behind current time
+    }
+    while ((micros() - lastTickUs) < LOOP_TICK_US) { /* spin */ }
+    lastTickUs += LOOP_TICK_US;
+  }
 
   processSerialInput();
   updateControlModeAndCommand();

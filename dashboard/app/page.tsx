@@ -721,10 +721,11 @@ export default function Page() {
             <div className="kv">
               <span>pot raw (debug)</span>
               <code>
-                {telemetry.pr ?? "-"}
-                {telemetry.p !== undefined && telemetry.pr !== undefined && (
-                  <> Δ{Math.abs(Number(telemetry.p) - Number(telemetry.pr))}</>
-                )}
+                {telemetry.pr !== undefined
+                  ? `${String(Number(telemetry.pr)).padStart(4, '0')} Δ${telemetry.p !== undefined
+                      ? String(Math.abs(Number(telemetry.p) - Number(telemetry.pr))).padStart(3, '0')
+                      : '---'}`
+                  : '-'}
               </code>
             </div>
           </section>
