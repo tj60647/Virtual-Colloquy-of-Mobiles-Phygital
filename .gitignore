@@ -3,3 +3,23 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Web dashboard (dashboard/) build and dependency outputs
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/.vercel/
+dashboard/npm-debug.log*
+dashboard/yarn-debug.log*
+dashboard/yarn-error.log*
+dashboard/pnpm-debug.log*
+
+# Environment variable files
+.env
+.env.*
+dashboard/.env
+dashboard/.env.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
