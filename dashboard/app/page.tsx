@@ -277,6 +277,9 @@ export default function Page() {
   const [history, setHistory] = useState<string[]>([]);
   const [sparkHistories, setSparkHistories] = useState<SparkHistories>({ p: [], c: [], a: [] });
   const [lastRxAt, setLastRxAt] = useState("-");
+  // True when connected but no telemetry frame has arrived in the last 5 seconds.
+  // Displayed as a warning badge so the student knows the device may be frozen.
+  const [stale, setStale] = useState(false);
 
   const portRef = useRef<any>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -284,6 +287,17 @@ export default function Page() {
   // BLE refs — hold references to the connected GATT device and characteristics.
   const bleDeviceRef = useRef<BluetoothDevice | null>(null);
   const bleRxCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  // bleTxCharRef + bleTxListenerRef must be stored so the listener can be
+  // removed on disconnect.  Without explicit removal, each reconnect adds
+  // another anonymous listener — those pile up and eventually freeze the tab.
+  const bleTxCharRef     = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const bleTxListenerRef = useRef<((event: Event) => void) | null>(null);
+  // BLE line-buffer stored in a ref so the named listener function doesn't
+  // close over a stale local variable from a previous connect call.
+  const bleBufRef        = useRef("");
+  // Epoch time (ms) of the last successfully processed telemetry line.
+  // Using a ref avoids re-renders and keeps staleness checks off the render path.
+  const lastRxMsRef      = useRef(0);
   const driveTimeRef = useRef(0);
   const trapPositionRef = useRef(0);
   const trapVelocityRef = useRef(0);
@@ -294,6 +308,20 @@ export default function Page() {
     setSupported(Boolean(navigator.serial));
     setBleSupported(Boolean(navigator.bluetooth));
   }, []);
+
+  // Periodically check whether telemetry has gone silent while connected.
+  // If no frame arrives for >5 s, mark the feed as stale so the student can
+  // see the device may be frozen rather than silently watching a frozen readout.
+  useEffect(() => {
+    if (!connected) {
+      setStale(false);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setStale(lastRxMsRef.current > 0 && Date.now() - lastRxMsRef.current > 5000);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [connected]);
 
   // g=1 means guard/timeout active; g=0 means ok.
   const guardBadgeClass = useMemo(() => (telemetry.g === "1" ? "badge warn" : "badge ok"), [telemetry.g]);
@@ -432,6 +460,7 @@ export default function Page() {
       setTransportType("serial");
       setConnected(true);
       setStatus("Connected via USB at 115200 baud");
+      lastRxMsRef.current = 0;
 
       const decoder = new TextDecoder();
       let buffer = "";
@@ -452,6 +481,8 @@ export default function Page() {
           setTelemetry(parsed);
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
+          lastRxMsRef.current = Date.now();
+          setStale(false);
           setSparkHistories((prev) => {
             const push = (arr: number[], v: string | undefined): number[] => {
               if (v === undefined) return arr;
@@ -495,14 +526,21 @@ export default function Page() {
       // Subscribe to telemetry notifications from the device.
       // BLE notifications may not align with newline boundaries, so buffer
       // partial frames the same way as the serial reader.
+      bleTxCharRef.current = txChar;
+      bleBufRef.current = "";
+      lastRxMsRef.current = 0;
       await txChar.startNotifications();
-      let bleBuffer = "";
-      txChar.addEventListener("characteristicvaluechanged", (event) => {
+      // Name the listener and store it in a ref so it can be removed on
+      // disconnect.  An anonymous listener added here can never be removed,
+      // which means every reconnect adds another active listener — they pile
+      // up and each one calls setState 5+ times per 50 ms frame, eventually
+      // freezing the browser tab.
+      const bleListener = (event: Event) => {
         const char = event.target as BluetoothRemoteGATTCharacteristic;
         const text = new TextDecoder().decode(char.value ?? new DataView(new ArrayBuffer(0)));
-        bleBuffer += text;
-        const lines = bleBuffer.split(/\r?\n/);
-        bleBuffer = lines.pop() ?? "";
+        bleBufRef.current += text;
+        const lines = bleBufRef.current.split(/\r?\n/);
+        bleBufRef.current = lines.pop() ?? "";
         for (const line of lines) {
           if (!line.trim()) continue;
           setLastLine(line);
@@ -510,6 +548,8 @@ export default function Page() {
           setTelemetry(parsedBle);
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
+          lastRxMsRef.current = Date.now();
+          setStale(false);
           setSparkHistories((prev) => {
             const push = (arr: number[], v: string | undefined): number[] => {
               if (v === undefined) return arr;
@@ -520,9 +560,20 @@ export default function Page() {
             return { p: push(prev.p, parsedBle.p), c: push(prev.c, parsedBle.c), a: push(prev.a, parsedBle.a) };
           });
         }
-      });
+      };
+      bleTxListenerRef.current = bleListener;
+      txChar.addEventListener("characteristicvaluechanged", bleListener);
 
       device.addEventListener("gattserverdisconnected", () => {
+        // Remove the named TX listener before clearing refs. This is the
+        // critical cleanup step that prevents listener accumulation across
+        // multiple disconnect/reconnect cycles.
+        if (bleTxListenerRef.current && bleTxCharRef.current) {
+          try { void bleTxCharRef.current.stopNotifications(); } catch { /* ignore */ }
+          bleTxCharRef.current.removeEventListener("characteristicvaluechanged", bleTxListenerRef.current);
+        }
+        bleTxListenerRef.current = null;
+        bleTxCharRef.current = null;
         bleDeviceRef.current = null;
         bleRxCharRef.current = null;
         setConnected(false);
@@ -545,10 +596,18 @@ export default function Page() {
   async function disconnect() {
     if (transportType === "ble") {
       try {
+        // Stop notifications and remove the listener before disconnecting so
+        // it cannot fire during or after teardown.
+        if (bleTxListenerRef.current && bleTxCharRef.current) {
+          try { void bleTxCharRef.current.stopNotifications(); } catch { /* ignore */ }
+          bleTxCharRef.current.removeEventListener("characteristicvaluechanged", bleTxListenerRef.current);
+        }
         bleDeviceRef.current?.gatt?.disconnect();
       } catch {
         // Ignore cleanup errors.
       } finally {
+        bleTxListenerRef.current = null;
+        bleTxCharRef.current = null;
         bleDeviceRef.current = null;
         bleRxCharRef.current = null;
       }
@@ -619,6 +678,9 @@ export default function Page() {
           <section className="card panel-tight">
             <h2>2) Streaming Data</h2>
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
+            {connected && stale && (
+              <div className="badge warn" style={{ marginBottom: 4 }}>no data — device may be frozen</div>
+            )}
             <div className="kv"><span>mode</span><code>{telemetry.m === "o" ? "oscillation" : telemetry.m === "s" ? "serial" : "-"}</code></div>
             <div className="kv"><span>guard</span><span className={guardBadgeClass}>{telemetry.g === "1" ? "timeout" : telemetry.g === "0" ? "ok" : "n/a"}</span></div>
             <div className="kv kv-spark">

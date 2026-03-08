@@ -13,6 +13,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <NimBLEDevice.h>
+#include <Adafruit_NeoPixel.h>
 
 /**
  * Module overview:
@@ -99,6 +100,21 @@ constexpr float OSCILLATION_AMPLITUDE  = 100.0f;
 constexpr float OSC_MAX_VELOCITY       = 5.0f;  // command units per second
 constexpr float OSC_MAX_ACCEL          = 5.0f;  // command units per second²
 
+// Built-in NeoPixel heartbeat — slow white breathing pulse proves the device
+// is alive and looping. PIN_NEOPIXEL and NEOPIXEL_POWER are defined by the
+// Adafruit Feather ESP32 V2 board variant. Fallbacks are here for safety.
+#ifndef PIN_NEOPIXEL
+#define PIN_NEOPIXEL 0
+#endif
+#ifndef NEOPIXEL_POWER
+#define NEOPIXEL_POWER 2
+#endif
+constexpr uint32_t HEARTBEAT_INTERVAL_MS    = 33;   // ~30 Hz update for smooth animation
+constexpr uint32_t HEARTBEAT_PERIOD_MS      = 3000; // one full breathe cycle
+constexpr uint8_t  HEARTBEAT_MAX_BRIGHTNESS = 40;   // 0–255; subtle, not blinding
+
+Adafruit_NeoPixel neoPixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
+
 enum class ControlMode {
   Serial,
   Oscillation,
@@ -132,6 +148,7 @@ float lastExpectedMinAngle = SERVO_MIN_ANGLE;
 float lastExpectedMaxAngle = SERVO_MAX_ANGLE;
 uint32_t lastStatusPrintMs = 0;
 uint32_t lastOledRefreshMs = 0;
+uint32_t lastHeartbeatMs   = 0;
 uint32_t lastValidSerialCommandMs = 0;
 ControlMode currentMode = ControlMode::Serial;
 bool oledAvailable = false;
@@ -674,11 +691,46 @@ void refreshOledStatus() {
 }
 
 /**
+ * Pulse the built-in NeoPixel with a slow white breathing animation.
+ *
+ * Brightness follows a sine wave so the transition is smooth and gradual.
+ * Running at ~30 Hz keeps CPU cost negligible (one pixel = ~50 µs of WS2812
+ * signal per show() call).
+ * This is a pure liveness indicator — if the heartbeat stops the device has
+ * locked up or lost power.
+ */
+void updateHeartbeat() {
+  const uint32_t now = millis();
+  if (now - lastHeartbeatMs < HEARTBEAT_INTERVAL_MS) {
+    return;
+  }
+  lastHeartbeatMs = now;
+
+  const float phase = (static_cast<float>(now % HEARTBEAT_PERIOD_MS) /
+                       static_cast<float>(HEARTBEAT_PERIOD_MS)) *
+                      2.0f * PI;
+  const float brightness = (sinf(phase) + 1.0f) * 0.5f *
+                            static_cast<float>(HEARTBEAT_MAX_BRIGHTNESS);
+  const uint8_t b = static_cast<uint8_t>(brightness);
+  neoPixel.setPixelColor(0, neoPixel.Color(b, b, b));
+  neoPixel.show();
+}
+
+/**
  * Arduino setup entry point for one-time peripheral initialization.
  */
 void setup() {
   Serial.begin(115200);
   delay(250);
+
+  // Enable and initialise the built-in NeoPixel.
+  // NEOPIXEL_POWER must be driven HIGH before calling neoPixel.begin() or
+  // the LED will not be powered. Turn it off immediately so startup is clean.
+  pinMode(NEOPIXEL_POWER, OUTPUT);
+  digitalWrite(NEOPIXEL_POWER, HIGH);
+  neoPixel.begin();
+  neoPixel.clear();
+  neoPixel.show();
 
   analogReadResolution(12);
   pinMode(POT_PIN, INPUT);
@@ -713,4 +765,5 @@ void loop() {
   applyServoOutput();
   printStatus();
   refreshOledStatus();
+  updateHeartbeat();
 }
