@@ -26,6 +26,11 @@ type ConnectErrorInfo = {
 
 type DashboardDriveMode = "manual" | "oscillator";
 
+// Shared packet key whitelist. Only these keys are accepted into telemetry state.
+const TELEMETRY_KEYS = new Set<keyof Telemetry>([
+  "c", "m", "g", "p", "pr", "a", "rn", "rx", "sm", "sx", "pw", "fv", "lps"
+]);
+
 const SERIAL_PORT_FILTERS = [
   { usbVendorId: 0x239a },
   { usbVendorId: 0x10c4 },
@@ -88,7 +93,11 @@ function parseTelemetry(line: string): Telemetry | null {
     if (!k || v === undefined) {
       return;
     }
-    out[k.trim() as keyof Telemetry] = v.trim();
+    const key = k.trim() as keyof Telemetry;
+    if (!TELEMETRY_KEYS.has(key)) {
+      return;
+    }
+    out[key] = v.trim();
   });
   // If nothing was parsed it was a plain-text line with no key=value pairs.
   return Object.keys(out).length > 0 ? out : null;

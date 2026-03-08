@@ -427,27 +427,52 @@ bool tryParseCommandLine(const char* line, float* outValue) {
     return false;
   }
 
-  // Accept the first numeric token in a line, e.g. "37", "pos=37", "cmd:-22.5".
-  const char* scan = line;
-  while (*scan != '\0') {
-    if ((*scan >= '0' && *scan <= '9') || *scan == '-' || *scan == '+') {
-      break;
+  // Packet definition (strict):
+  //   1) plain numeric token only: "37", "-22.5", "+10"
+  //   2) prefixed numeric token:   "cmd:37", "cmd=37", "pos:-22.5", "pos=-22.5"
+  // Any other text is rejected. This prevents accidental digits in debug strings
+  // from being interpreted as motion commands.
+  auto skipSpaces = [](const char* s) -> const char* {
+    while (*s == ' ' || *s == '\t') {
+      ++s;
     }
-    ++scan;
+    return s;
+  };
+
+  auto parseStrictFloat = [&](const char* s, float* parsedOut) -> bool {
+    if (s == nullptr || parsedOut == nullptr) {
+      return false;
+    }
+    s = skipSpaces(s);
+    char* endPtr = nullptr;
+    const float parsed = strtof(s, &endPtr);
+    if (endPtr == s) {
+      return false;
+    }
+    const char* tail = skipSpaces(endPtr);
+    if (*tail != '\0') {
+      return false;
+    }
+    *parsedOut = parsed;
+    return true;
+  };
+
+  const char* scan = skipSpaces(line);
+
+  // Plain numeric form.
+  if (parseStrictFloat(scan, outValue)) {
+    return true;
   }
 
-  if (*scan == '\0') {
-    return false;
+  // Prefixed forms for serial-monitor convenience.
+  if ((strncmp(scan, "cmd:", 4) == 0) || (strncmp(scan, "cmd=", 4) == 0)) {
+    return parseStrictFloat(scan + 4, outValue);
+  }
+  if ((strncmp(scan, "pos:", 4) == 0) || (strncmp(scan, "pos=", 4) == 0)) {
+    return parseStrictFloat(scan + 4, outValue);
   }
 
-  char* endPtr = nullptr;
-  const float parsed = strtof(scan, &endPtr);
-  if (endPtr == scan) {
-    return false;
-  }
-
-  *outValue = parsed;
-  return true;
+  return false;
 }
 
 /**
