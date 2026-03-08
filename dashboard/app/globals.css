@@ -63,7 +63,7 @@ p {
 .compact-layout {
   margin-top: 10px;
   display: grid;
-  grid-template-columns: 290px 360px minmax(420px, 1fr);
+  grid-template-columns: 360px 360px minmax(420px, 1fr);
   gap: 10px;
   align-items: start;
 }
@@ -284,6 +284,10 @@ input[type="range"] {
   stroke: #8e6da9;
 }
 
+.spark-line-pw {
+  stroke: #2b6cb0;
+}
+
 .kv:last-child {
   border-bottom: none;
 }
@@ -403,6 +407,79 @@ details > summary {
 
 .servo-panel {
   min-width: 0;
+}
+
+.pw-graph {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #faf8f1;
+  padding: 8px;
+}
+
+.pw-graph-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.pw-graph svg {
+  display: block;
+  width: 100%;
+  height: 180px;
+  border: 1px solid #e2dfd4;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fffef9 0%, #f3efe4 100%);
+}
+
+.pw-midline {
+  stroke: #b8b4a6;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.pw-grid {
+  stroke: #d4d1c7;
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.pw-grid-vertical {
+  stroke: #e1ddd2;
+  stroke-width: 1;
+}
+
+.pw-axis {
+  stroke: #8f8b7d;
+  stroke-width: 1;
+}
+
+.pw-label {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 16px;
+  fill: #5f655f;
+}
+
+.pw-axis-title {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 14px;
+  fill: #5f655f;
+}
+
+.pw-empty {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 16px;
+  fill: #7c847d;
+}
+
+.pw-wave {
+  fill: none;
+  stroke: #2b6cb0;
+  stroke-width: 2;
+  stroke-linecap: round;
 }
 
 .dial-legend {

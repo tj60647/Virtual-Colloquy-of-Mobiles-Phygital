@@ -47,17 +47,32 @@ const NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // device → b
 
 const COMMAND_MIN = -100;
 const COMMAND_MAX = 100;
+const OSC_AMPLITUDE_FIXED = 100;
 const DASHBOARD_DRIVE_HZ = 20;
 const PROFILE_GRAPH_WIDTH = 280;
 const PROFILE_GRAPH_HEIGHT = 96;
 const PROFILE_GRAPH_SAMPLES = 120;
 const SPARK_MAX_POINTS = 80;
+const PW_GRAPH_VIEWBOX_WIDTH = 1000;
+const PW_GRAPH_VIEWBOX_HEIGHT = 280;
+const PW_GRAPH_PAD_LEFT = 76;
+const PW_GRAPH_PAD_RIGHT = 14;
+const PW_GRAPH_PAD_TOP = 18;
+const PW_GRAPH_PAD_BOTTOM = 52;
+const PW_GRAPH_WINDOW_MS = 10000;
+const PW_GRAPH_MIN_US = 1000;
+const PW_GRAPH_MAX_US = 2500;
+
+type TimedSample = {
+  tMs: number;
+  value: number;
+};
 
 // Fixed domain bounds for each sparkline channel.
 const SPARK_BOUNDS = {
-  p: { min: 0,    max: 4095 },
   c: { min: -100, max: 100  },
   a: { min: 0,    max: 180  },
+  pw: { min: PW_GRAPH_MIN_US, max: PW_GRAPH_MAX_US },
 } as const;
 type SparkKey = keyof typeof SPARK_BOUNDS;
 
@@ -81,6 +96,47 @@ function sparkPoints(
       const y = q((1 - (v - minVal) / (maxVal - minVal)) * height);
       return `${x},${y}`;
     })
+    .join(" ");
+}
+
+function pwY(valueUs: number): number {
+  const plotHeight = PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_TOP - PW_GRAPH_PAD_BOTTOM;
+  const ratio = (valueUs - PW_GRAPH_MIN_US) / (PW_GRAPH_MAX_US - PW_GRAPH_MIN_US);
+  return q(PW_GRAPH_PAD_TOP + (1 - ratio) * plotHeight);
+}
+
+function pwXFromTime(tMs: number, nowMs: number): number {
+  const plotWidth = PW_GRAPH_VIEWBOX_WIDTH - PW_GRAPH_PAD_LEFT - PW_GRAPH_PAD_RIGHT;
+  const windowStartMs = nowMs - PW_GRAPH_WINDOW_MS;
+  const ratio = (tMs - windowStartMs) / PW_GRAPH_WINDOW_MS;
+  return q(PW_GRAPH_PAD_LEFT + clamp(ratio, 0, 1) * plotWidth);
+}
+
+function pwPlotMidY(): number {
+  return pwY(1500);
+}
+
+function pwPlotLeftX(): number {
+  return PW_GRAPH_PAD_LEFT;
+}
+
+function pwPlotRightX(): number {
+  return PW_GRAPH_VIEWBOX_WIDTH - PW_GRAPH_PAD_RIGHT;
+}
+
+// Build points from timestamped samples so the x-axis is true elapsed time,
+// not just "N latest points". This keeps the graph width fixed at 10 seconds.
+function pulseWidthGraphPoints(samples: TimedSample[], nowMs: number): string {
+  if (samples.length < 2) {
+    return "";
+  }
+  const windowStartMs = nowMs - PW_GRAPH_WINDOW_MS;
+  const visible = samples.filter((s) => s.tMs >= windowStartMs && s.tMs <= nowMs);
+  if (visible.length < 2) {
+    return "";
+  }
+  return visible
+    .map((s) => `${pwXFromTime(s.tMs, nowMs)},${pwY(s.value)}`)
     .join(" ");
 }
 
@@ -286,14 +342,14 @@ export default function Page() {
   const [connectTips, setConnectTips] = useState<string[]>([]);
   const [commandInput, setCommandInput] = useState("0");
   const [driveMode, setDriveMode] = useState<DashboardDriveMode>("manual");
-  const [oscAmplitude, setOscAmplitude] = useState(100);
   const [maxVel, setMaxVel] = useState(8);
   const [maxAccel, setMaxAccel] = useState(8);
   const [servoSpecRangeDeg, setServoSpecRangeDeg] = useState(180);
   const [lastLine, setLastLine] = useState("Waiting for serial data...");
   const [telemetry, setTelemetry] = useState<Telemetry>({});
   const [history, setHistory] = useState<string[]>([]);
-  const [sparkHistories, setSparkHistories] = useState<SparkHistories>({ p: [], c: [], a: [] });
+  const [sparkHistories, setSparkHistories] = useState<SparkHistories>({ c: [], a: [], pw: [] });
+  const [pwHistory, setPwHistory] = useState<TimedSample[]>([]);
   const [lastRxAt, setLastRxAt] = useState("-");
   // True when connected but no telemetry frame has arrived in the last 5 seconds.
   // Displayed as a warning badge so the student knows the device may be frozen.
@@ -319,7 +375,7 @@ export default function Page() {
   const driveTimeRef = useRef(0);
   const trapPositionRef = useRef(0);
   const trapVelocityRef = useRef(0);
-  const trapTargetRef = useRef(100);
+  const trapTargetRef = useRef(OSC_AMPLITUDE_FIXED);
   const sendBusyRef = useRef(false);
 
   useEffect(() => {
@@ -371,9 +427,11 @@ export default function Page() {
   const rangeMaxTip = useMemo(() => pointForDegree(rangeMaxDeg, 126), [rangeMaxDeg]);
   const activeCenterTip = useMemo(() => pointForDegree(activeRangeCenterDeg, 120), [activeRangeCenterDeg]);
   const motionProfilePoints = useMemo(
-    () => buildTrapezoidProfilePoints(oscAmplitude, maxVel, maxAccel),
-    [oscAmplitude, maxVel, maxAccel]
+    () => buildTrapezoidProfilePoints(OSC_AMPLITUDE_FIXED, maxVel, maxAccel),
+    [maxVel, maxAccel]
   );
+  const pwNowMs = Date.now();
+  const pwPoints = useMemo(() => pulseWidthGraphPoints(pwHistory, pwNowMs), [pwHistory, pwNowMs]);
 
   async function sendCommand(raw: string) {
     // Format to one decimal place (e.g. "37.0", "-50.0") so the value is
@@ -404,7 +462,7 @@ export default function Page() {
   }
 
   function stepTrapezoid(dt: number): number {
-    const amplitude = clamp(oscAmplitude, 0, 100);
+    const amplitude = OSC_AMPLITUDE_FIXED;
     const accel = Math.max(0, maxAccel);
     const vmax = Math.max(0, maxVel);
     if (amplitude < 0.001 || vmax < 0.001 || accel < 0.001) {
@@ -458,7 +516,7 @@ export default function Page() {
     }, periodMs);
 
     return () => window.clearInterval(timer);
-  }, [connected, driveMode, oscAmplitude, maxVel, maxAccel]);
+  }, [connected, driveMode, maxVel, maxAccel]);
 
   async function connect() {
     if (!navigator.serial) {
@@ -508,8 +566,15 @@ export default function Page() {
                 if (!Number.isFinite(n)) return arr;
                 return [...arr, n].slice(-SPARK_MAX_POINTS);
               };
-              return { p: push(prev.p, parsed.p), c: push(prev.c, parsed.c), a: push(prev.a, parsed.a) };
+              return { c: push(prev.c, parsed.c), a: push(prev.a, parsed.a), pw: push(prev.pw, parsed.pw) };
             });
+            if (parsed.pw !== undefined) {
+              const n = Number(parsed.pw);
+              if (Number.isFinite(n)) {
+                const nowMs = Date.now();
+                setPwHistory((prev) => [...prev, { tMs: nowMs, value: n }].filter((s) => s.tMs >= nowMs - PW_GRAPH_WINDOW_MS - 2000));
+              }
+            }
           }
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
@@ -577,8 +642,15 @@ export default function Page() {
                 if (!Number.isFinite(n)) return arr;
                 return [...arr, n].slice(-SPARK_MAX_POINTS);
               };
-              return { p: push(prev.p, parsedBle.p), c: push(prev.c, parsedBle.c), a: push(prev.a, parsedBle.a) };
+              return { c: push(prev.c, parsedBle.c), a: push(prev.a, parsedBle.a), pw: push(prev.pw, parsedBle.pw) };
             });
+            if (parsedBle.pw !== undefined) {
+              const n = Number(parsedBle.pw);
+              if (Number.isFinite(n)) {
+                const nowMs = Date.now();
+                setPwHistory((prev) => [...prev, { tMs: nowMs, value: n }].filter((s) => s.tMs >= nowMs - PW_GRAPH_WINDOW_MS - 2000));
+              }
+            }
           }
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
@@ -660,7 +732,7 @@ export default function Page() {
   function activateDriveMode(next: DashboardDriveMode) {
     setDriveMode(next);
     if (next === "oscillator") {
-      const amplitude = Math.abs(oscAmplitude);
+      const amplitude = OSC_AMPLITUDE_FIXED;
       const initial = clamp(toNumber(commandInput, 0), -amplitude, amplitude);
       trapPositionRef.current = initial;
       trapVelocityRef.current = 0;
@@ -738,30 +810,21 @@ export default function Page() {
               </code>
             </div>
             <div className="kv"><span>range (active, snapped)</span><code>{Math.round(rangeMinDeg)} – {Math.round(rangeMaxDeg)}°</code></div>
-            <div className="kv"><span>range (unsnapped debug)</span><code>{telemetry.sm ?? "-"} – {telemetry.sx ?? "-"}°</code></div>
             <div className="kv kv-spark">
-              <span>pot ADC</span>
+              <span>pulse width</span>
               <span className="spark-cell">
                 <svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">
-                  {sparkHistories.p.length > 1 && <polyline points={sparkPoints(sparkHistories.p, SPARK_BOUNDS.p.min, SPARK_BOUNDS.p.max)} className="spark-line spark-line-pot" />}
+                  <line
+                    x1="0"
+                    y1={q((1 - (1500 - SPARK_BOUNDS.pw.min) / (SPARK_BOUNDS.pw.max - SPARK_BOUNDS.pw.min)) * 28)}
+                    x2="200"
+                    y2={q((1 - (1500 - SPARK_BOUNDS.pw.min) / (SPARK_BOUNDS.pw.max - SPARK_BOUNDS.pw.min)) * 28)}
+                    className="spark-mid"
+                  />
+                  {sparkHistories.pw.length > 1 && <polyline points={sparkPoints(sparkHistories.pw, SPARK_BOUNDS.pw.min, SPARK_BOUNDS.pw.max)} className="spark-line spark-line-pw" />}
                 </svg>
-                <code>{telemetry.p ?? "-"}</code>
+                <code>{telemetry.pw ? `${telemetry.pw} µs` : "-"}</code>
               </span>
-            </div>
-            {/* pr = raw unfiltered ADC. Shown for debugging: if p and pr are close,
-                the hardware cap + software filter are working. If pr jumps wildly
-                while p stays steady, the filter is doing its job. If both jump,
-                the noise is too wide for the filter — check wiring or increase
-                the 1 µF cap. */}
-            <div className="kv">
-              <span>pot raw (debug)</span>
-              <code>
-                {telemetry.pr !== undefined
-                  ? `${String(Number(telemetry.pr)).padStart(4, '0')} Δ${telemetry.p !== undefined
-                      ? String(Math.abs(Number(telemetry.p) - Number(telemetry.pr))).padStart(3, '0')
-                      : '---'}`
-                  : '-'}
-              </code>
             </div>
           </section>
 
@@ -789,9 +852,8 @@ export default function Page() {
             <input type="text" value={commandInput} onChange={(e) => setCommandInput(e.target.value)} disabled={driveMode === "oscillator"} placeholder="-100 to 100" />
             <button className="primary" disabled={!connected || driveMode === "oscillator"} onClick={() => sendCommand(commandInput)}>Send</button>
           </div>
-          <div className="kv"><span>amplitude (units)</span><input type="number" min={0} max={100} step={1} value={oscAmplitude} onChange={(e) => setOscAmplitude(clamp(Number(e.target.value), 0, 100))} disabled={driveMode !== "oscillator"} /></div>
-          <div className="kv"><span>max velocity (units/s)</span><input type="number" min={0} max={20} step={0.5} value={maxVel} onChange={(e) => setMaxVel(clamp(Number(e.target.value), 0, 20))} disabled={driveMode !== "oscillator"} /></div>
-          <div className="kv"><span>max acceleration (units/s²)</span><input type="number" min={0} max={20} step={0.5} value={maxAccel} onChange={(e) => setMaxAccel(clamp(Number(e.target.value), 0, 20))} disabled={driveMode !== "oscillator"} /></div>
+          <div className="kv"><span>max velocity (units/s)</span><input type="number" min={0} max={100} step={0.5} value={maxVel} onChange={(e) => setMaxVel(clamp(Number(e.target.value), 0, 100))} disabled={driveMode !== "oscillator"} /></div>
+          <div className="kv"><span>max acceleration (units/s²)</span><input type="number" min={0} max={100} step={0.5} value={maxAccel} onChange={(e) => setMaxAccel(clamp(Number(e.target.value), 0, 100))} disabled={driveMode !== "oscillator"} /></div>
           <div className="profile-graph" aria-label="Trapezoidal motion profile preview">
             <div className="profile-graph-head"><span>trapezoidal command profile</span></div>
             <svg viewBox={`0 0 ${PROFILE_GRAPH_WIDTH} ${PROFILE_GRAPH_HEIGHT}`} role="img" aria-label="Command versus time graph">
@@ -833,6 +895,59 @@ export default function Page() {
               <div className="kv"><span>servo spec range</span><input type="number" min={0} max={220} step={1} value={servoSpecRangeDeg} onChange={(e) => setServoSpecRangeDeg(clamp(Number(e.target.value), 0, 220))} /></div>
               <div className="kv"><span>spec min/max</span><code>{Math.round(servoSpecMin)} to {Math.round(servoSpecMax)} deg</code></div>
             </div>
+          </div>
+          <div className="pw-graph" aria-label="Servo pulse width history">
+            <div className="pw-graph-head">
+              <span>pulse width over time (10 second window)</span>
+              <code>{PW_GRAPH_MIN_US} to {PW_GRAPH_MAX_US} µs</code>
+            </div>
+            <svg viewBox={`0 0 ${PW_GRAPH_VIEWBOX_WIDTH} ${PW_GRAPH_VIEWBOX_HEIGHT}`} role="img" aria-label="Pulse width versus time graph">
+              <line x1={pwPlotLeftX()} y1={pwY(2500)} x2={pwPlotRightX()} y2={pwY(2500)} className="pw-grid" />
+              <line x1={pwPlotLeftX()} y1={pwY(2250)} x2={pwPlotRightX()} y2={pwY(2250)} className="pw-grid" />
+              <line x1={pwPlotLeftX()} y1={pwY(2000)} x2={pwPlotRightX()} y2={pwY(2000)} className="pw-grid" />
+              <line x1={pwPlotLeftX()} y1={pwY(1750)} x2={pwPlotRightX()} y2={pwY(1750)} className="pw-grid" />
+              <line x1={pwPlotLeftX()} y1={pwPlotMidY()} x2={pwPlotRightX()} y2={pwPlotMidY()} className="pw-midline" />
+              <line x1={pwPlotLeftX()} y1={pwY(1250)} x2={pwPlotRightX()} y2={pwY(1250)} className="pw-grid" />
+              <line x1={pwPlotLeftX()} y1={pwY(1000)} x2={pwPlotRightX()} y2={pwY(1000)} className="pw-grid" />
+
+              <line x1={pwPlotLeftX()} y1={PW_GRAPH_PAD_TOP} x2={pwPlotLeftX()} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-axis" />
+              <line x1={pwPlotLeftX()} y1={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} x2={pwPlotRightX()} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-axis" />
+
+              <line x1={pwPlotLeftX()} y1={PW_GRAPH_PAD_TOP} x2={pwPlotLeftX()} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-grid-vertical" />
+              <line x1={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.2)} y1={PW_GRAPH_PAD_TOP} x2={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.2)} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-grid-vertical" />
+              <line x1={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.4)} y1={PW_GRAPH_PAD_TOP} x2={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.4)} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-grid-vertical" />
+              <line x1={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.6)} y1={PW_GRAPH_PAD_TOP} x2={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.6)} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-grid-vertical" />
+              <line x1={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.8)} y1={PW_GRAPH_PAD_TOP} x2={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.8)} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-grid-vertical" />
+              <line x1={pwPlotRightX()} y1={PW_GRAPH_PAD_TOP} x2={pwPlotRightX()} y2={PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM} className="pw-grid-vertical" />
+
+              <text x={PW_GRAPH_PAD_LEFT - 10} y={pwY(2500) + 5} className="pw-label" textAnchor="end">2500</text>
+              <text x={PW_GRAPH_PAD_LEFT - 10} y={pwY(2000) + 5} className="pw-label" textAnchor="end">2000</text>
+              <text x={PW_GRAPH_PAD_LEFT - 10} y={pwY(1500) + 5} className="pw-label" textAnchor="end">1500</text>
+              <text x={PW_GRAPH_PAD_LEFT - 10} y={pwY(1000) + 5} className="pw-label" textAnchor="end">1000</text>
+
+              <text x={pwPlotLeftX()} y={PW_GRAPH_VIEWBOX_HEIGHT - 18} className="pw-label" textAnchor="start">-10s</text>
+              <text x={q(pwPlotLeftX() + (pwPlotRightX() - pwPlotLeftX()) * 0.5)} y={PW_GRAPH_VIEWBOX_HEIGHT - 18} className="pw-label" textAnchor="middle">-5s</text>
+              <text x={pwPlotRightX()} y={PW_GRAPH_VIEWBOX_HEIGHT - 18} className="pw-label" textAnchor="end">now</text>
+              <text x={12} y={q((PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM + PW_GRAPH_PAD_TOP) * 0.5)} className="pw-axis-title" textAnchor="middle" transform={`rotate(-90, 12, ${q((PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM + PW_GRAPH_PAD_TOP) * 0.5)})`}>pulse width (µs)</text>
+              <text x={q((pwPlotLeftX() + pwPlotRightX()) * 0.5)} y={PW_GRAPH_VIEWBOX_HEIGHT - 4} className="pw-axis-title" textAnchor="middle">time (last 10 seconds)</text>
+
+              {pwPoints && (
+                <polyline
+                  points={pwPoints}
+                  className="pw-wave"
+                />
+              )}
+              {!pwPoints && (
+                <text
+                  x={q((pwPlotLeftX() + pwPlotRightX()) * 0.5)}
+                  y={q((PW_GRAPH_PAD_TOP + PW_GRAPH_VIEWBOX_HEIGHT - PW_GRAPH_PAD_BOTTOM) * 0.5)}
+                  className="pw-empty"
+                  textAnchor="middle"
+                >
+                  waiting for pulse width telemetry
+                </text>
+              )}
+            </svg>
           </div>
         </section>
       </div>
