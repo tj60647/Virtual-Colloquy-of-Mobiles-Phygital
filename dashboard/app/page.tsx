@@ -40,6 +40,38 @@ const DASHBOARD_DRIVE_HZ = 20;
 const PROFILE_GRAPH_WIDTH = 280;
 const PROFILE_GRAPH_HEIGHT = 96;
 const PROFILE_GRAPH_SAMPLES = 120;
+const SPARK_MAX_POINTS = 80;
+
+// Fixed domain bounds for each sparkline channel.
+const SPARK_BOUNDS = {
+  p: { min: 0,    max: 4095 },
+  c: { min: -100, max: 100  },
+  a: { min: 0,    max: 180  },
+} as const;
+type SparkKey = keyof typeof SPARK_BOUNDS;
+
+type SparkHistories = Record<SparkKey, number[]>;
+
+/**
+ * Build an SVG polyline points string for a sparkline.
+ * bounds are fixed (not auto-scaled) so the baseline is stable.
+ */
+function sparkPoints(
+  values: number[],
+  minVal: number,
+  maxVal: number,
+  width = 200,
+  height = 28
+): string {
+  if (values.length < 2) return "";
+  return values
+    .map((v, i) => {
+      const x = q((i / (values.length - 1)) * width);
+      const y = q((1 - (v - minVal) / (maxVal - minVal)) * height);
+      return `${x},${y}`;
+    })
+    .join(" ");
+}
 
 function parseTelemetry(line: string): Telemetry {
   const out: Telemetry = {};
@@ -243,6 +275,7 @@ export default function Page() {
   const [lastLine, setLastLine] = useState("Waiting for serial data...");
   const [telemetry, setTelemetry] = useState<Telemetry>({});
   const [history, setHistory] = useState<string[]>([]);
+  const [sparkHistories, setSparkHistories] = useState<SparkHistories>({ p: [], c: [], a: [] });
   const [lastRxAt, setLastRxAt] = useState("-");
 
   const portRef = useRef<any>(null);
@@ -415,9 +448,19 @@ export default function Page() {
             continue;
           }
           setLastLine(line);
-          setTelemetry(parseTelemetry(line));
+          const parsed = parseTelemetry(line);
+          setTelemetry(parsed);
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
+          setSparkHistories((prev) => {
+            const push = (arr: number[], v: string | undefined): number[] => {
+              if (v === undefined) return arr;
+              const n = Number(v);
+              if (!Number.isFinite(n)) return arr;
+              return [...arr, n].slice(-SPARK_MAX_POINTS);
+            };
+            return { p: push(prev.p, parsed.p), c: push(prev.c, parsed.c), a: push(prev.a, parsed.a) };
+          });
         }
       }
     } catch (error) {
@@ -463,9 +506,19 @@ export default function Page() {
         for (const line of lines) {
           if (!line.trim()) continue;
           setLastLine(line);
-          setTelemetry(parseTelemetry(line));
+          const parsedBle = parseTelemetry(line);
+          setTelemetry(parsedBle);
           setHistory((prev) => [line, ...prev].slice(0, 120));
           setLastRxAt(new Date().toLocaleTimeString());
+          setSparkHistories((prev) => {
+            const push = (arr: number[], v: string | undefined): number[] => {
+              if (v === undefined) return arr;
+              const n = Number(v);
+              if (!Number.isFinite(n)) return arr;
+              return [...arr, n].slice(-SPARK_MAX_POINTS);
+            };
+            return { p: push(prev.p, parsedBle.p), c: push(prev.c, parsedBle.c), a: push(prev.a, parsedBle.a) };
+          });
         }
       });
 
@@ -568,15 +621,40 @@ export default function Page() {
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
             <div className="kv"><span>mode</span><code>{telemetry.m === "o" ? "oscillation" : telemetry.m === "s" ? "serial" : "-"}</code></div>
             <div className="kv"><span>guard</span><span className={guardBadgeClass}>{telemetry.g === "1" ? "timeout" : telemetry.g === "0" ? "ok" : "n/a"}</span></div>
-            <div className="kv"><span>command</span><code>{telemetry.c ?? "-"}</code></div>
-            <div className="kv"><span>servo angle</span><code>{Math.round(currentAngleDeg)} deg</code></div>
+            <div className="kv kv-spark">
+              <span>command</span>
+              <span className="spark-cell">
+                <svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">
+                  <line x1="0" y1="14" x2="200" y2="14" className="spark-mid" />
+                  {sparkHistories.c.length > 1 && <polyline points={sparkPoints(sparkHistories.c, SPARK_BOUNDS.c.min, SPARK_BOUNDS.c.max)} className="spark-line" />}
+                </svg>
+                <code>{telemetry.c ?? "-"}</code>
+              </span>
+            </div>
+            <div className="kv kv-spark">
+              <span>servo angle</span>
+              <span className="spark-cell">
+                <svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">
+                  {sparkHistories.a.length > 1 && <polyline points={sparkPoints(sparkHistories.a, SPARK_BOUNDS.a.min, SPARK_BOUNDS.a.max)} className="spark-line spark-line-angle" />}
+                </svg>
+                <code>{Math.round(currentAngleDeg)} deg</code>
+              </span>
+            </div>
             <div className="kv"><span>range</span><code>{Math.round(rangeMinDeg)} to {Math.round(rangeMaxDeg)} deg</code></div>
-            <div className="kv"><span>pot ADC</span><code>{telemetry.p ?? "-"}</code></div>
-            <div className="log log-small" style={{ marginTop: 8 }}>{lastLine}</div>
+            <div className="kv kv-spark">
+              <span>pot ADC</span>
+              <span className="spark-cell">
+                <svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">
+                  {sparkHistories.p.length > 1 && <polyline points={sparkPoints(sparkHistories.p, SPARK_BOUNDS.p.min, SPARK_BOUNDS.p.max)} className="spark-line spark-line-pot" />}
+                </svg>
+                <code>{telemetry.p ?? "-"}</code>
+              </span>
+            </div>
           </section>
 
           <section className="card panel-tight">
             <h2>3) Serial History</h2>
+            <div className="log log-small" style={{ marginBottom: 8 }}>{lastLine}</div>
             <details>
               <summary>Show recent lines</summary>
               <div className="log history-log" style={{ marginTop: 8 }}>
