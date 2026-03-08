@@ -65,15 +65,21 @@ constexpr uint8_t I2C_SCL_PIN = SCL;
 // LS-3006 exact travel/pulse specs are not yet confirmed, so start conservative.
 constexpr int SERVO_MIN_US = 1000;
 constexpr int SERVO_MAX_US = 2000;
-constexpr float SERVO_MIN_ANGLE = 30.0f;
-constexpr float SERVO_MAX_ANGLE = 150.0f;
+// For prototype calibration behavior, assume logical 0..180 degree span.
+// Potentiometer at maximum will collapse travel to center (~90 deg).
+constexpr float SERVO_MIN_ANGLE = 0.0f;
+constexpr float SERVO_MAX_ANGLE = 180.0f;
 
 constexpr float COMMAND_MIN = -100.0f;
 constexpr float COMMAND_MAX = 100.0f;
 
 // Potentiometer controls how much of the available servo span is used.
-constexpr float CALIBRATION_SPAN_MIN_SCALE = 0.35f;
-constexpr float CALIBRATION_SPAN_MAX_SCALE = 1.00f;
+// User request mapping:
+// - pot at 0    => full range (span scale = 1.0)
+// - pot at max  => zero range, hold center (~90 deg) (span scale = 0.0)
+constexpr float CALIBRATION_SPAN_MIN_SCALE = 0.0f;
+constexpr float CALIBRATION_SPAN_MAX_SCALE = 1.0f;
+constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 32;
 
 constexpr size_t SERIAL_BUFFER_LEN = 64;
 constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 200;
@@ -100,6 +106,10 @@ size_t serialBufferPos = 0;
 float commandedPosition = 0.0f;
 float appliedAngle = 90.0f;
 uint16_t lastPotRaw = 0;
+uint16_t lastPotAverage = 0;
+float lastSpanScale = 1.0f;
+float lastExpectedMinAngle = SERVO_MIN_ANGLE;
+float lastExpectedMaxAngle = SERVO_MAX_ANGLE;
 uint32_t lastStatusPrintMs = 0;
 uint32_t lastOledRefreshMs = 0;
 uint32_t lastValidSerialCommandMs = 0;
@@ -107,6 +117,10 @@ ControlMode currentMode = ControlMode::Serial;
 bool oledAvailable = false;
 uint8_t oledAddress = 0;
 bool serialTimeoutGuardActive = false;
+uint16_t potFilterBuffer[POT_RUNNING_AVERAGE_SAMPLES] = {0};
+size_t potFilterIndex = 0;
+uint32_t potFilterSum = 0;
+bool potFilterInitialized = false;
 
 /**
  * Clamp a floating-point value into an explicit inclusive range.
@@ -150,13 +164,36 @@ float normalizedFromCommand(float commandValue) {
  */
 float readCalibrationSpanScale(uint16_t* potRawOut) {
   const uint16_t potRaw = analogRead(POT_PIN);
-  if (potRawOut != nullptr) {
-    *potRawOut = potRaw;
+  lastPotRaw = potRaw;
+
+  if (!potFilterInitialized) {
+    // Initialize the running-average window to the first sample to avoid
+    // startup transients that would otherwise shrink range temporarily.
+    for (size_t i = 0; i < POT_RUNNING_AVERAGE_SAMPLES; ++i) {
+      potFilterBuffer[i] = potRaw;
+      potFilterSum += potRaw;
+    }
+    potFilterInitialized = true;
+    potFilterIndex = 0;
+  } else {
+    potFilterSum -= potFilterBuffer[potFilterIndex];
+    potFilterBuffer[potFilterIndex] = potRaw;
+    potFilterSum += potRaw;
+    potFilterIndex = (potFilterIndex + 1) % POT_RUNNING_AVERAGE_SAMPLES;
   }
 
-  const float unit = static_cast<float>(potRaw) / 4095.0f;
-  return CALIBRATION_SPAN_MIN_SCALE +
-         unit * (CALIBRATION_SPAN_MAX_SCALE - CALIBRATION_SPAN_MIN_SCALE);
+  const uint16_t potAverage =
+      static_cast<uint16_t>(potFilterSum / POT_RUNNING_AVERAGE_SAMPLES);
+  lastPotAverage = potAverage;
+
+  if (potRawOut != nullptr) {
+    *potRawOut = potAverage;
+  }
+
+  const float unit = static_cast<float>(potAverage) / 4095.0f;
+  const float inverted = 1.0f - unit;
+  return clampf(inverted, CALIBRATION_SPAN_MIN_SCALE,
+                CALIBRATION_SPAN_MAX_SCALE);
 }
 
 /**
@@ -174,6 +211,29 @@ float commandToServoAngle(float commandValue, float spanScale) {
   const float normalized = normalizedFromCommand(commandValue);
   const float angle = center + normalized * maxTravelFromCenter;
   return clampf(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+}
+
+/**
+ * Compute expected minimum and maximum reachable angle for current span scale.
+ *
+ * @param spanScale Current calibration span scale in [0, 1].
+ * @param minAngleOut Output pointer for computed minimum angle.
+ * @param maxAngleOut Output pointer for computed maximum angle.
+ */
+void expectedServoRangeFromScale(float spanScale, float* minAngleOut,
+                                 float* maxAngleOut) {
+  const float center = (SERVO_MIN_ANGLE + SERVO_MAX_ANGLE) * 0.5f;
+  const float maxTravelFromCenter =
+      ((SERVO_MAX_ANGLE - SERVO_MIN_ANGLE) * 0.5f) * spanScale;
+
+  if (minAngleOut != nullptr) {
+    *minAngleOut = clampf(center - maxTravelFromCenter, SERVO_MIN_ANGLE,
+                          SERVO_MAX_ANGLE);
+  }
+  if (maxAngleOut != nullptr) {
+    *maxAngleOut = clampf(center + maxTravelFromCenter, SERVO_MIN_ANGLE,
+                          SERVO_MAX_ANGLE);
+  }
 }
 
 /**
@@ -262,6 +322,9 @@ void processSerialInput() {
  */
 void applyServoOutput() {
   const float spanScale = readCalibrationSpanScale(&lastPotRaw);
+  lastSpanScale = spanScale;
+  expectedServoRangeFromScale(spanScale, &lastExpectedMinAngle,
+                              &lastExpectedMaxAngle);
   appliedAngle = commandToServoAngle(commandedPosition, spanScale);
   pointerServo.write(static_cast<int>(appliedAngle));
 }
@@ -328,6 +391,10 @@ void printStatus() {
   Serial.print(serialTimeoutGuardActive ? "timeout" : "ok");
   Serial.print(",potRaw=");
   Serial.print(lastPotRaw);
+  Serial.print(",rangeMinDeg=");
+  Serial.print(lastExpectedMinAngle, 1);
+  Serial.print(",rangeMaxDeg=");
+  Serial.print(lastExpectedMaxAngle, 1);
   Serial.print(",servoAngleDeg=");
   Serial.println(appliedAngle, 1);
 }
@@ -400,8 +467,11 @@ void refreshOledStatus() {
   oled.print("Command: ");
   oled.println(commandedPosition, 1);
 
-  oled.print("Pot raw: ");
-  oled.println(lastPotRaw);
+  oled.print("Range min: ");
+  oled.println(lastExpectedMinAngle, 1);
+
+  oled.print("Range max: ");
+  oled.println(lastExpectedMaxAngle, 1);
 
   oled.print("Angle deg: ");
   oled.println(appliedAngle, 1);
