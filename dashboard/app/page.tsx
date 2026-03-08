@@ -7,7 +7,8 @@ type Telemetry = {
   c?: string;   // commanded position
   m?: string;   // mode (s=serial, o=oscillation)
   g?: string;   // guard active (1=timeout, 0=ok)
-  p?: string;   // potentiometer ADC average
+  p?: string;   // pot ADC — stage-2 filtered (EMA of box average); what the servo uses
+  pr?: string;  // pot ADC — raw, unfiltered; compare to p to measure filter effectiveness
   a?: string;   // applied servo angle (degrees)
   rn?: string;  // range minimum angle (degrees)
   rx?: string;  // range maximum angle (degrees)
@@ -711,6 +712,20 @@ export default function Page() {
                 </svg>
                 <code>{telemetry.p ?? "-"}</code>
               </span>
+            </div>
+            {/* pr = raw unfiltered ADC. Shown for debugging: if p and pr are close,
+                the hardware cap + software filter are working. If pr jumps wildly
+                while p stays steady, the filter is doing its job. If both jump,
+                the noise is too wide for the filter — check wiring or increase
+                the 1 µF cap. */}
+            <div className="kv">
+              <span>pot raw (debug)</span>
+              <code>
+                {telemetry.pr ?? "-"}
+                {telemetry.p !== undefined && telemetry.pr !== undefined && (
+                  <> Δ{Math.abs(Number(telemetry.p) - Number(telemetry.pr))}</>
+                )}
+              </code>
             </div>
           </section>
 

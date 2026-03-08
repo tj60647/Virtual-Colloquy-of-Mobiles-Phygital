@@ -80,7 +80,9 @@ constexpr float COMMAND_MAX = 100.0f;
 // - pot at max  => zero range, hold center (~90 deg) (span scale = 0.0)
 constexpr float CALIBRATION_SPAN_MIN_SCALE = 0.0f;
 constexpr float CALIBRATION_SPAN_MAX_SCALE = 1.0f;
-constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 32;
+// 64 samples gives a wider averaging window to better reject BLE radio
+// interference, which causes ESP32 ADC spikes that outlast shorter windows.
+constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 64;
 
 constexpr size_t SERIAL_BUFFER_LEN = 64;
 constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard oscillator drive rate
@@ -90,6 +92,19 @@ constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 // Snap the displayed range bounds (rn/rx) to this increment as the user turns
 // the calibration knob. The servo itself moves continuously at full resolution.
 constexpr float RANGE_DISPLAY_STEP_DEG = 5.0f;
+
+// Second-stage IIR exponential moving average (EMA) applied on top of the
+// box (running-average) filter. Lower alpha = smoother output but slower
+// response to deliberate knob turns. 0.08 gives roughly a 0.8 s settling
+// time. The two-stage approach handles fast spike noise (box filter) AND
+// the slow RF-coupled drift from the BLE radio that survives the box stage.
+constexpr float POT_EMA_ALPHA = 0.08f;
+
+// Hysteresis margin applied around each snap boundary. Without this a
+// filtered reading hovering within 1 ADC count of a 5-degree boundary
+// will toggle back and forth every frame. 1.5 degrees on each side gives
+// a 3-degree dead zone — invisible on a physical knob, eliminates toggling.
+constexpr float SNAP_HYSTERESIS_DEG = 1.5f;
 
 // Trapezoidal oscillation: pointer travels between -OSCILLATION_AMPLITUDE and
 // +OSCILLATION_AMPLITUDE with a velocity-limited, acceleration-limited profile.
@@ -141,8 +156,9 @@ size_t serialBufferPos = 0;
 
 float commandedPosition = 0.0f;
 float appliedAngle = 90.0f;
-uint16_t lastPotRaw = 0;
-uint16_t lastPotAverage = 0;
+uint16_t lastPotRaw = 0;     // raw ADC sample, preserved for debug telemetry (pr=)
+uint16_t lastPotAverage = 0; // box-filter output (stage 1)
+float    lastPotEma = 0.0f;  // EMA output (stage 2) — this is what the servo uses
 float lastSpanScale = 1.0f;
 float lastExpectedMinAngle = SERVO_MIN_ANGLE;
 float lastExpectedMaxAngle = SERVO_MAX_ANGLE;
@@ -187,6 +203,42 @@ float snapToNearestIncrement(float angleDeg, float increment) {
 }
 
 /**
+ * Snap with hysteresis: like snapToNearestIncrement but adds a dead zone
+ * around each bucket boundary so a noisy reading cannot toggle between
+ * two adjacent snap values every frame.
+ *
+ * The boundary between two adjacent snap values is at their midpoint.
+ * A new snap value is only committed when the continuous reading has moved
+ * at least SNAP_HYSTERESIS_DEG past that midpoint — effectively widening
+ * the "staying" region and narrowing the "switching" region.
+ *
+ * Example (5-degree step, 1.5-degree hysteresis):
+ *   Currently at 85 deg. Switch to 90 only when reading >= 89.0 deg.
+ *   Currently at 90 deg. Switch to 85 only when reading <= 86.0 deg.
+ *
+ * @param angleDeg     Continuous angle in degrees.
+ * @param increment    Snap step size in degrees.
+ * @param lastSnapped  Previous snapped output to compare against.
+ * @return             New snapped value, or lastSnapped if inside dead zone.
+ */
+float snapWithHysteresis(float angleDeg, float increment, float lastSnapped) {
+  const float newSnapped = roundf(angleDeg / increment) * increment;
+  if (fabsf(newSnapped - lastSnapped) < 0.001f) {
+    // Already in the same bucket — no change.
+    return lastSnapped;
+  }
+  // midpoint between the two candidate snap values
+  const float boundary = (newSnapped + lastSnapped) * 0.5f;
+  if (newSnapped > lastSnapped) {
+    // Moving higher: only commit once we're past boundary + margin.
+    return (angleDeg >= boundary + SNAP_HYSTERESIS_DEG) ? newSnapped : lastSnapped;
+  } else {
+    // Moving lower: only commit once we're past boundary - margin.
+    return (angleDeg <= boundary - SNAP_HYSTERESIS_DEG) ? newSnapped : lastSnapped;
+  }
+}
+
+/**
  * Clamp a floating-point value into an explicit inclusive range.
  *
  * @param value Input value to clamp.
@@ -219,42 +271,49 @@ float normalizedFromCommand(float commandValue) {
 /**
  * Read potentiometer and convert ADC code into servo-span scale factor.
  *
- * ADC assumptions:
- * - 12-bit resolution (`0..4095`)
- * - Input pin tied to user calibration potentiometer
+ * Two-stage filter pipeline:
+ *   Stage 1 — box (running-average) filter over POT_RUNNING_AVERAGE_SAMPLES.
+ *             Removes fast, sample-to-sample ADC jitter.
+ *   Stage 2 — exponential moving average (IIR) with alpha = POT_EMA_ALPHA.
+ *             Removes slower RF-coupled drift from the BLE radio that
+ *             outlasts the box filter window.
  *
- * @param potRawOut Optional output pointer for raw ADC capture.
+ * lastPotRaw is preserved as the unfiltered sample for debug telemetry (pr=).
+ * lastPotAverage holds the stage-1 box output.
+ * lastPotEma holds the stage-2 EMA output — this value drives the servo.
+ *
  * @return Span scale in [CALIBRATION_SPAN_MIN_SCALE, CALIBRATION_SPAN_MAX_SCALE].
  */
-float readCalibrationSpanScale(uint16_t* potRawOut) {
+float readCalibrationSpanScale() {
   const uint16_t potRaw = analogRead(POT_PIN);
-  lastPotRaw = potRaw;
+  lastPotRaw = potRaw;  // preserve raw sample — never overwrite this
 
   if (!potFilterInitialized) {
-    // Initialize the running-average window to the first sample to avoid
-    // startup transients that would otherwise shrink range temporarily.
+    // Seed both filter stages from the first sample so startup is stable.
     for (size_t i = 0; i < POT_RUNNING_AVERAGE_SAMPLES; ++i) {
       potFilterBuffer[i] = potRaw;
       potFilterSum += potRaw;
     }
     potFilterInitialized = true;
     potFilterIndex = 0;
+    lastPotAverage = potRaw;
+    lastPotEma     = static_cast<float>(potRaw);
   } else {
+    // Stage 1: box filter — slide the window forward.
     potFilterSum -= potFilterBuffer[potFilterIndex];
     potFilterBuffer[potFilterIndex] = potRaw;
     potFilterSum += potRaw;
     potFilterIndex = (potFilterIndex + 1) % POT_RUNNING_AVERAGE_SAMPLES;
+    const uint16_t boxAvg =
+        static_cast<uint16_t>(potFilterSum / POT_RUNNING_AVERAGE_SAMPLES);
+    lastPotAverage = boxAvg;
+
+    // Stage 2: EMA on top of the box average.
+    lastPotEma = lastPotEma * (1.0f - POT_EMA_ALPHA) +
+                 static_cast<float>(boxAvg) * POT_EMA_ALPHA;
   }
 
-  const uint16_t potAverage =
-      static_cast<uint16_t>(potFilterSum / POT_RUNNING_AVERAGE_SAMPLES);
-  lastPotAverage = potAverage;
-
-  if (potRawOut != nullptr) {
-    *potRawOut = potAverage;
-  }
-
-  const float unit = static_cast<float>(potAverage) / 4095.0f;
+  const float unit     = lastPotEma / 4095.0f;
   const float inverted = 1.0f - unit;
   return clampf(inverted, CALIBRATION_SPAN_MIN_SCALE,
                 CALIBRATION_SPAN_MAX_SCALE);
@@ -409,16 +468,20 @@ void processSerialInput() {
  * - Updates `appliedAngle` and writes to servo driver.
  */
 void applyServoOutput() {
-  const float spanScale = readCalibrationSpanScale(&lastPotRaw);
+  // Capture previous snapped values before they are overwritten by
+  // expectedServoRangeFromScale(). snapWithHysteresis() needs them to know
+  // which bucket we are currently committed to.
+  const float prevSnappedMin = lastExpectedMinAngle;
+  const float prevSnappedMax = lastExpectedMaxAngle;
+
+  const float spanScale = readCalibrationSpanScale();
   lastSpanScale = spanScale;
   expectedServoRangeFromScale(spanScale, &lastExpectedMinAngle,
                               &lastExpectedMaxAngle);
-  // Snap the range endpoints to the nearest increment. This quantizes away
-  // ADC noise from the pot before it propagates into the servo output.
-  // Everything downstream — including the servo command — uses these snapped
-  // values, so the jitter is eliminated at the source.
-  lastExpectedMinAngle = snapToNearestIncrement(lastExpectedMinAngle, RANGE_DISPLAY_STEP_DEG);
-  lastExpectedMaxAngle = snapToNearestIncrement(lastExpectedMaxAngle, RANGE_DISPLAY_STEP_DEG);
+  // Snap with hysteresis: quantizes noise AND prevents boundary toggling.
+  // The servo and all downstream logic use these snapped values.
+  lastExpectedMinAngle = snapWithHysteresis(lastExpectedMinAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMin);
+  lastExpectedMaxAngle = snapWithHysteresis(lastExpectedMaxAngle, RANGE_DISPLAY_STEP_DEG, prevSnappedMax);
 
   // Derive the applied angle from the snapped bounds, not from raw spanScale.
   // This keeps the servo output consistent with what rn/rx report.
@@ -546,13 +609,16 @@ void printStatus() {
   // Build the telemetry frame once and route to all active transports.
   // Using snprintf ensures the frame is a proper null-terminated string
   // that can be sent to Serial and BLE without duplication.
-  char frame[64];
+  // Frame budget check (buffer is 80 bytes):
+  // c=-100,m=o,g=1,p=4095,pr=4095,a=180,rn=180,rx=180 = ~52 chars + null = 53
+  char frame[80];
   snprintf(frame, sizeof(frame),
-           "c=%d,m=%c,g=%d,p=%u,a=%d,rn=%d,rx=%d",
+           "c=%d,m=%c,g=%d,p=%u,pr=%u,a=%d,rn=%d,rx=%d",
            static_cast<int>(roundf(commandedPosition)),
            currentMode == ControlMode::Oscillation ? 'o' : 's',
            serialTimeoutGuardActive ? 1 : 0,
-           static_cast<unsigned int>(lastPotAverage),
+           static_cast<unsigned int>(lastPotEma),  // stage-2 filtered (what servo uses)
+           static_cast<unsigned int>(lastPotRaw),  // raw ADC — debug: compare to p to see noise
            toWholeDegrees(appliedAngle),
            toWholeDegrees(lastExpectedMinAngle),
            toWholeDegrees(lastExpectedMaxAngle));
@@ -562,7 +628,7 @@ void printStatus() {
   // Notify BLE client if one is connected. Append \n so the dashboard
   // line-split parser treats this the same as a USB serial line.
   if (bleClientConnected && bleTxCharacteristic != nullptr) {
-    char frameNl[66];
+    char frameNl[82];
     snprintf(frameNl, sizeof(frameNl), "%s\n", frame);
     bleTxCharacteristic->setValue(reinterpret_cast<uint8_t*>(frameNl), strlen(frameNl));
     bleTxCharacteristic->notify();
