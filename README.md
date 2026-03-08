@@ -1,6 +1,17 @@
 # Colloquy of Mobiles Virtual Simulation — Phygital
 
-Prototype firmware for an ESP32-based pointer device that converts position commands from a computer into physical servo motion.
+Prototype system for an ESP32-based pointer device that converts position commands from a computer into physical servo motion.
+
+## Repository Layout
+
+```
+dashboard/        ← Next.js web app (browser UI / WebSerial host)
+firmware/         ← PlatformIO ESP32 firmware (runs on the physical device)
+firmware/docs/    ← Datasheets and hardware references
+```
+
+Open `firmware/` in PlatformIO to build and upload device code.  
+Open `dashboard/` in a Node.js environment to run the web interface.
 
 Author: Thomas J McLeish  
 License: MIT
@@ -181,7 +192,7 @@ If you later add these files, link them from this section for instructor review.
 
 ## Firmware Architecture
 The project currently uses a single main module:
-- `src/main.cpp`
+- `firmware/src/main.cpp`
 
 Functional blocks:
 - Input parsing: receives newline-delimited serial commands.
@@ -295,9 +306,9 @@ From project root:
 
 ## Project Documents
 - `AGENTS.md`: project coding and documentation rules
-- `docs/ls-3006-servo-datasheet.md`: servo reference notes
-- `docs/gm12864-oled-module.md`: OLED reference notes
-- `docs/design-student-quickstart.md`: beginner quickstart
+- `firmware/docs/ls-3006-servo-datasheet.md`: servo reference notes
+- `firmware/docs/gm12864-oled-module.md`: OLED reference notes
+- `firmware/docs/design-student-quickstart.md`: beginner quickstart
 
 ## Known Prototype Risks
 - Servo model behavior may differ from listing/spec claims.
