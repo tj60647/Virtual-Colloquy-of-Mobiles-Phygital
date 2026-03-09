@@ -123,7 +123,7 @@ constexpr uint32_t SERIAL_BAUD_RATE = 460800;
 // Keep OLED responsive; partial redraw logic in refreshOledStatus() limits
 // redraw work by only updating changed value fields.
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
-constexpr uint32_t OLED_I2C_FAST_HZ = 400000;
+constexpr uint32_t OLED_I2C_FAST_HZ = 1000000;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
 // Fixed loop tick rate: 500 Hz (2 ms floor per iteration).
@@ -970,7 +970,7 @@ void initOled() {
   oled.setTextSize(1);
   oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 0);
-  oled.println("Virtual Colloquy");
+  oled.println("Colloquy Mobiles");
   oled.print("fw v");
   oled.println(FIRMWARE_VERSION);
   oled.println("OLED online");
@@ -1073,10 +1073,10 @@ void flushOledDirtyRegion() {
     size_t src = rowOffset + xStart;
     size_t remaining = static_cast<size_t>(xEnd - xStart + 1);
 
-    // 31-byte payload keeps compatibility with conservative 32-byte Wire buffers
-    // while reducing begin/end transmission overhead versus tiny chunks.
+    // 63-byte payload cuts I2C transaction overhead while remaining safely
+    // below typical ESP32 Wire buffer limits.
     while (remaining > 0) {
-      const size_t chunk = min<size_t>(remaining, 31u);
+      const size_t chunk = min<size_t>(remaining, 63u);
       Wire.beginTransmission(oledAddress);
       Wire.write(0x40);
       Wire.write(buffer + src, chunk);
@@ -1132,7 +1132,7 @@ void refreshOledStatus() {
   if (!oledStatusLayoutDrawn) {
     oled.clearDisplay();
     oled.setCursor(0, 0);
-    oled.println("Virtual Colloquy");
+    oled.println("Colloquy Mobiles");
     oled.print("fw v");
     oled.println(FIRMWARE_VERSION);
     oled.setCursor(0, 16);

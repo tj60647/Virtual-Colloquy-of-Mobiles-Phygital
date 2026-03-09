@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Colloquy of Mobiles VS Phygital",
+  title: "Colloquy of Mobiles Virtual Simulation Phygital",
   description: "WebSerial testing dashboard for the Colloquy of Mobiles Virtual Simulation Phygital firmware"
 };
 

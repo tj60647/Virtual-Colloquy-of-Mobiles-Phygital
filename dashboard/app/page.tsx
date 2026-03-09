@@ -1446,7 +1446,7 @@ export default function Page() {
           </section>
 
           <section className="card panel-tight">
-            <h2>Streaming Data</h2>
+                <h1>Colloquy of Mobiles Virtual Simulation Phygital</h1>
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
             <div className="kv"><span>firmware</span><code>{telemetry.fv ?? "-"}</code></div>
             <div className="kv">
