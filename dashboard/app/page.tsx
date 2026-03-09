@@ -29,6 +29,8 @@ type Telemetry = {
   so?: string;   // max applyServoOutput() duration in diagnostics window (microseconds)
   st?: string;   // max printStatus() duration in diagnostics window (microseconds)
   od?: string;   // max refreshOledStatus() duration in diagnostics window (microseconds)
+  odr?: string;  // max OLED framebuffer render time in diagnostics window (microseconds)
+  odx?: string;  // max OLED transfer time in diagnostics window (microseconds)
   odb?: string;  // max OLED transfer volume in diagnostics window (bytes written over I2C)
   hb?: string;   // max updateHeartbeat() duration in diagnostics window (microseconds)
 };
@@ -43,7 +45,7 @@ type DashboardDriveMode = "manual" | "oscillator";
 // Shared packet key whitelist. Only these keys are accepted into telemetry state.
 const TELEMETRY_KEYS = new Set<keyof Telemetry>([
   "c", "m", "g", "p", "pr", "a", "rn", "rx", "sm", "sx", "pw", "fv", "lps", "lu",
-  "perf", "lp", "lpa", "lpm", "lm", "si", "cm", "ps", "so", "st", "od", "odb", "hb"
+  "perf", "lp", "lpa", "lpm", "lm", "si", "cm", "ps", "so", "st", "od", "odr", "odx", "odb", "hb"
 ]);
 
 const SERIAL_PORT_FILTERS = [
@@ -132,6 +134,8 @@ const PERF_SPARK_BOUNDS = {
   so: { min: 0, max: 2000 },
   st: { min: 0, max: 5000 },
   od: { min: 0, max: 35000 },
+  odr: { min: 0, max: 10000 },
+  odx: { min: 0, max: 35000 },
   odb: { min: 0, max: 1400 },
   hb: { min: 0, max: 2000 },
 } as const;
@@ -623,7 +627,7 @@ export default function Page() {
   const [history, setHistory] = useState<string[]>([]);
   const [sparkHistories, setSparkHistories] = useState<SparkHistories>({ c: [], a: [], pw: [] });
   const [perfSparkHistories, setPerfSparkHistories] = useState<PerfSparkHistories>({
-    lps: [], lp: [], lpa: [], lpm: [], lu: [], lm: [], si: [], cm: [], ps: [], so: [], st: [], od: [], odb: [], hb: []
+    lps: [], lp: [], lpa: [], lpm: [], lu: [], lm: [], si: [], cm: [], ps: [], so: [], st: [], od: [], odr: [], odx: [], odb: [], hb: []
   });
   const [pwHistory, setPwHistory] = useState<TimedSample[]>([]);
   const [lastRxAt, setLastRxAt] = useState("-");
@@ -693,6 +697,8 @@ export default function Page() {
     telemetry.so !== undefined ||
     telemetry.st !== undefined ||
     telemetry.od !== undefined ||
+    telemetry.odr !== undefined ||
+    telemetry.odx !== undefined ||
     telemetry.odb !== undefined ||
     telemetry.hb !== undefined;
 
@@ -1164,6 +1170,8 @@ export default function Page() {
                 so: pushTimed(prev.so, parsed.so),
                 st: pushTimed(prev.st, parsed.st),
                 od: pushTimed(prev.od, parsed.od),
+                odr: pushTimed(prev.odr, parsed.odr),
+                odx: pushTimed(prev.odx, parsed.odx),
                 odb: pushTimed(prev.odb, parsed.odb),
                 hb: pushTimed(prev.hb, parsed.hb),
               };
@@ -1278,6 +1286,8 @@ export default function Page() {
                 so: pushTimed(prev.so, parsedBle.so),
                 st: pushTimed(prev.st, parsedBle.st),
                 od: pushTimed(prev.od, parsedBle.od),
+                odr: pushTimed(prev.odr, parsedBle.odr),
+                odx: pushTimed(prev.odx, parsedBle.odx),
                 odb: pushTimed(prev.odb, parsedBle.odb),
                 hb: pushTimed(prev.hb, parsedBle.hb),
               };
@@ -1531,6 +1541,8 @@ export default function Page() {
                 <div className="kv kv-spark"><span>servo out (so avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.so.length > 1 && <polyline points={perfSparkPointsFor("so")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("so")}</code></span></div>
                 <div className="kv kv-spark"><span>status emit (st avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.st.length > 1 && <polyline points={perfSparkPointsFor("st")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("st")}</code></span></div>
                 <div className="kv kv-spark"><span>oled draw (od avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.od.length > 1 && <polyline points={perfSparkPointsFor("od")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("od")}</code></span></div>
+                <div className="kv kv-spark"><span>oled render (odr avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.odr.length > 1 && <polyline points={perfSparkPointsFor("odr")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("odr")}</code></span></div>
+                <div className="kv kv-spark"><span>oled transfer (odx avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.odx.length > 1 && <polyline points={perfSparkPointsFor("odx")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("odx")}</code></span></div>
                 <div className="kv kv-spark"><span>oled bytes (odb avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.odb.length > 1 && <polyline points={perfSparkPointsFor("odb")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("odb")}</code></span></div>
                 <div className="kv kv-spark"><span>heartbeat (hb avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.hb.length > 1 && <polyline points={perfSparkPointsFor("hb")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("hb")}</code></span></div>
               </div>

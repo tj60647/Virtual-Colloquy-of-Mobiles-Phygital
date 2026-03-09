@@ -117,7 +117,7 @@ constexpr float POT_ADC_CEILING = 3975.0f;
 constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 64;
 
 constexpr size_t SERIAL_BUFFER_LEN = 64;
-constexpr size_t TELEMETRY_FRAME_BUFFER_LEN = 192;
+constexpr size_t TELEMETRY_FRAME_BUFFER_LEN = 224;
 constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard oscillator drive rate
 constexpr uint32_t SERIAL_BAUD_RATE = 460800;
 // Keep OLED responsive; partial redraw logic in refreshOledStatus() limits
@@ -280,6 +280,8 @@ uint8_t oledDirtyPageMin = 7;
 uint8_t oledDirtyPageMax = 0;
 bool oledStatusLayoutDrawn = false;
 uint32_t lastOledTransferBytes = 0; // bytes written to SSD1306 on last refresh pass
+uint32_t lastOledRenderUs = 0;      // OLED framebuffer update time in last refresh pass
+uint32_t lastOledTransferUs = 0;    // OLED I2C transfer time in last refresh pass
 ControlMode oledShownMode = ControlMode::Serial;
 bool oledShownGuard = false;
 int oledShownCommandTenths = 32767;
@@ -1111,6 +1113,9 @@ void drawOledValueRow(uint8_t y, uint8_t valueX, const char* valueText) {
  * - Returns immediately when OLED is unavailable.
  */
 void refreshOledStatus() {
+  lastOledRenderUs = 0;
+  lastOledTransferUs = 0;
+
   if (!oledAvailable) {
     return;
   }
@@ -1120,6 +1125,8 @@ void refreshOledStatus() {
     return;
   }
   lastOledRefreshMs = now;
+
+  const uint32_t renderStartUs = micros();
 
   bool dirty = false;
   if (!oledStatusLayoutDrawn) {
@@ -1188,8 +1195,12 @@ void refreshOledStatus() {
   }
 
   if (dirty) {
+    const uint32_t transferStartUs = micros();
     flushOledDirtyRegion();
+    lastOledTransferUs = micros() - transferStartUs;
   }
+
+  lastOledRenderUs = micros() - renderStartUs;
 }
 
 /**
@@ -1355,6 +1366,8 @@ void loop() {
   static uint32_t maxServoOutputUs = 0;
   static uint32_t maxPrintStatusUs = 0;
   static uint32_t maxOledUs = 0;
+  static uint32_t maxOledRenderUs = 0;
+  static uint32_t maxOledTransferUs = 0;
   static uint32_t maxOledBytes = 0;
   static uint32_t maxHeartbeatUs = 0;
   static uint32_t maxLoopWorkUs = 0;
@@ -1404,6 +1417,12 @@ void loop() {
   if (oledUs > maxOledUs) {
     maxOledUs = oledUs;
   }
+  if (lastOledRenderUs > maxOledRenderUs) {
+    maxOledRenderUs = lastOledRenderUs;
+  }
+  if (lastOledTransferUs > maxOledTransferUs) {
+    maxOledTransferUs = lastOledTransferUs;
+  }
   if (lastOledTransferBytes > maxOledBytes) {
     maxOledBytes = lastOledTransferBytes;
   }
@@ -1440,13 +1459,15 @@ void loop() {
     // lu = previous loop active-work duration in us
     // lm = max loop active-work duration in window in us
     // si/cm/ps/so/st/od/hb = max task duration in window in us
+    // odr = max OLED framebuffer render time in window in us
+    // odx = max OLED I2C transfer time in window in us
     // odb = max OLED transfer volume in window (bytes written over I2C)
     const uint32_t avgLoopPeriodUs = (loopPeriodSamples == 0)
       ? 0u
       : static_cast<uint32_t>(sumLoopPeriodUs / static_cast<uint64_t>(loopPeriodSamples));
     char perfFrame[TELEMETRY_FRAME_BUFFER_LEN];
     snprintf(perfFrame, sizeof(perfFrame),
-       "perf=1,lp=%lu,lpa=%lu,lpm=%lu,lu=%lu,lm=%lu,si=%lu,cm=%lu,ps=%lu,so=%lu,st=%lu,od=%lu,odb=%lu,hb=%lu",
+         "perf=1,lp=%lu,lpa=%lu,lpm=%lu,lu=%lu,lm=%lu,si=%lu,cm=%lu,ps=%lu,so=%lu,st=%lu,od=%lu,odr=%lu,odx=%lu,odb=%lu,hb=%lu",
              static_cast<unsigned long>(lastLoopPeriodUs),
          static_cast<unsigned long>(avgLoopPeriodUs),
          static_cast<unsigned long>(maxLoopPeriodUs),
@@ -1458,6 +1479,8 @@ void loop() {
              static_cast<unsigned long>(maxServoOutputUs),
              static_cast<unsigned long>(maxPrintStatusUs),
              static_cast<unsigned long>(maxOledUs),
+           static_cast<unsigned long>(maxOledRenderUs),
+           static_cast<unsigned long>(maxOledTransferUs),
          static_cast<unsigned long>(maxOledBytes),
              static_cast<unsigned long>(maxHeartbeatUs));
     emitTelemetryFrame(perfFrame);
@@ -1470,6 +1493,8 @@ void loop() {
     maxServoOutputUs = 0;
     maxPrintStatusUs = 0;
     maxOledUs = 0;
+    maxOledRenderUs = 0;
+    maxOledTransferUs = 0;
     maxOledBytes = 0;
     maxHeartbeatUs = 0;
     maxLoopWorkUs = 0;
