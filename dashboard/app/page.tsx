@@ -20,6 +20,8 @@ type Telemetry = {
   lu?: string;  // loop active-work duration (microseconds)
   perf?: string; // performance diagnostics frame marker (1 when perf frame is present)
   lp?: string;   // loop period (microseconds)
+  lpa?: string;  // average loop period over diagnostics window (microseconds)
+  lpm?: string;  // maximum loop period over diagnostics window (microseconds)
   lm?: string;   // max loop work duration in last diagnostics window (microseconds)
   si?: string;   // max processSerialInput() duration in diagnostics window (microseconds)
   cm?: string;   // max updateControlModeAndCommand() duration in diagnostics window (microseconds)
@@ -27,6 +29,7 @@ type Telemetry = {
   so?: string;   // max applyServoOutput() duration in diagnostics window (microseconds)
   st?: string;   // max printStatus() duration in diagnostics window (microseconds)
   od?: string;   // max refreshOledStatus() duration in diagnostics window (microseconds)
+  odb?: string;  // max OLED transfer volume in diagnostics window (bytes written over I2C)
   hb?: string;   // max updateHeartbeat() duration in diagnostics window (microseconds)
 };
 
@@ -40,7 +43,7 @@ type DashboardDriveMode = "manual" | "oscillator";
 // Shared packet key whitelist. Only these keys are accepted into telemetry state.
 const TELEMETRY_KEYS = new Set<keyof Telemetry>([
   "c", "m", "g", "p", "pr", "a", "rn", "rx", "sm", "sx", "pw", "fv", "lps", "lu",
-  "perf", "lp", "lm", "si", "cm", "ps", "so", "st", "od", "hb"
+  "perf", "lp", "lpa", "lpm", "lm", "si", "cm", "ps", "so", "st", "od", "odb", "hb"
 ]);
 
 const SERIAL_PORT_FILTERS = [
@@ -118,6 +121,8 @@ const SPARK_BOUNDS = {
 const PERF_SPARK_BOUNDS = {
   lps: { min: 0, max: 600 },
   lp: { min: 0, max: 4000 },
+  lpa: { min: 0, max: 4000 },
+  lpm: { min: 0, max: 12000 },
   lu: { min: 0, max: 4000 },
   lm: { min: 0, max: 35000 },
   si: { min: 0, max: 2000 },
@@ -126,6 +131,7 @@ const PERF_SPARK_BOUNDS = {
   so: { min: 0, max: 2000 },
   st: { min: 0, max: 5000 },
   od: { min: 0, max: 35000 },
+  odb: { min: 0, max: 1400 },
   hb: { min: 0, max: 2000 },
 } as const;
 type SparkKey = keyof typeof SPARK_BOUNDS;
@@ -142,7 +148,7 @@ function sparkPoints(
   values: number[],
   minVal: number,
   maxVal: number,
-  width = 200,
+  width = 400,
   height = 28
 ): string {
   if (values.length < 2) return "";
@@ -161,7 +167,7 @@ function timedSparkPoints(
   nowMs: number,
   minVal: number,
   maxVal: number,
-  width = 200,
+  width = 400,
   height = 28,
   windowMs = PERF_SPARK_WINDOW_MS
 ): string {
@@ -180,6 +186,24 @@ function timedSparkPoints(
       return `${x},${y}`;
     })
     .join(" ");
+}
+
+// Compute running average over the visible time window used by the perf sparkline.
+function timedWindowAverage(
+  samples: TimedSample[],
+  nowMs: number,
+  windowMs = PERF_SPARK_WINDOW_MS
+): number | null {
+  if (samples.length === 0) {
+    return null;
+  }
+  const startMs = nowMs - windowMs;
+  const visible = samples.filter((s) => s.tMs >= startMs && s.tMs <= nowMs);
+  if (visible.length === 0) {
+    return null;
+  }
+  const sum = visible.reduce((acc, s) => acc + s.value, 0);
+  return sum / visible.length;
 }
 
 function pwY(valueUs: number): number {
@@ -598,7 +622,7 @@ export default function Page() {
   const [history, setHistory] = useState<string[]>([]);
   const [sparkHistories, setSparkHistories] = useState<SparkHistories>({ c: [], a: [], pw: [] });
   const [perfSparkHistories, setPerfSparkHistories] = useState<PerfSparkHistories>({
-    lps: [], lp: [], lu: [], lm: [], si: [], cm: [], ps: [], so: [], st: [], od: [], hb: []
+    lps: [], lp: [], lpa: [], lpm: [], lu: [], lm: [], si: [], cm: [], ps: [], so: [], st: [], od: [], odb: [], hb: []
   });
   const [pwHistory, setPwHistory] = useState<TimedSample[]>([]);
   const [lastRxAt, setLastRxAt] = useState("-");
@@ -659,6 +683,8 @@ export default function Page() {
   const perfStreamActive =
     telemetry.perf === "1" ||
     telemetry.lp !== undefined ||
+    telemetry.lpa !== undefined ||
+    telemetry.lpm !== undefined ||
     telemetry.lm !== undefined ||
     telemetry.si !== undefined ||
     telemetry.cm !== undefined ||
@@ -666,6 +692,7 @@ export default function Page() {
     telemetry.so !== undefined ||
     telemetry.st !== undefined ||
     telemetry.od !== undefined ||
+    telemetry.odb !== undefined ||
     telemetry.hb !== undefined;
 
   const rangeMinDeg = useMemo(() => toNumber(telemetry.rn, 0), [telemetry.rn]);
@@ -956,6 +983,36 @@ export default function Page() {
     PERF_SPARK_BOUNDS[key].min,
     PERF_SPARK_BOUNDS[key].max
   );
+  const perfWindowAverageFor = (key: PerfSparkKey): number | null =>
+    timedWindowAverage(perfSparkHistories[key], pwNowMs);
+  const formatPerfValue = (key: PerfSparkKey, value: number): string => {
+    if (key === "lps") {
+      return value.toFixed(1);
+    }
+    if (key === "odb") {
+      return `${Math.round(value)} B`;
+    }
+    return `${Math.round(value)} us`;
+  };
+  const perfDisplayValue = (key: PerfSparkKey): string => {
+    const avg = perfWindowAverageFor(key);
+    const latestRaw = telemetry[key];
+    const latest = latestRaw === undefined ? null : Number(latestRaw);
+
+    const avgText = avg === null ? null : formatPerfValue(key, avg);
+    const latestText = latest !== null && Number.isFinite(latest) ? formatPerfValue(key, latest) : null;
+
+    if (avgText !== null && latestText !== null) {
+      return `${avgText} | ${latestText}`;
+    }
+    if (avgText !== null) {
+      return avgText;
+    }
+    if (latestText !== null) {
+      return latestText;
+    }
+    return "-";
+  };
 
   async function sendCommand(raw: string) {
     const bounded = clamp(toNumber(raw, 0), commandLowerBound, commandUpperBound);
@@ -1096,6 +1153,8 @@ export default function Page() {
               return {
                 lps: pushTimed(prev.lps, parsed.lps),
                 lp: pushTimed(prev.lp, parsed.lp),
+                lpa: pushTimed(prev.lpa, parsed.lpa),
+                lpm: pushTimed(prev.lpm, parsed.lpm),
                 lu: pushTimed(prev.lu, parsed.lu),
                 lm: pushTimed(prev.lm, parsed.lm),
                 si: pushTimed(prev.si, parsed.si),
@@ -1104,6 +1163,7 @@ export default function Page() {
                 so: pushTimed(prev.so, parsed.so),
                 st: pushTimed(prev.st, parsed.st),
                 od: pushTimed(prev.od, parsed.od),
+                odb: pushTimed(prev.odb, parsed.odb),
                 hb: pushTimed(prev.hb, parsed.hb),
               };
             });
@@ -1207,6 +1267,8 @@ export default function Page() {
               return {
                 lps: pushTimed(prev.lps, parsedBle.lps),
                 lp: pushTimed(prev.lp, parsedBle.lp),
+                lpa: pushTimed(prev.lpa, parsedBle.lpa),
+                lpm: pushTimed(prev.lpm, parsedBle.lpm),
                 lu: pushTimed(prev.lu, parsedBle.lu),
                 lm: pushTimed(prev.lm, parsedBle.lm),
                 si: pushTimed(prev.si, parsedBle.si),
@@ -1215,6 +1277,7 @@ export default function Page() {
                 so: pushTimed(prev.so, parsedBle.so),
                 st: pushTimed(prev.st, parsedBle.st),
                 od: pushTimed(prev.od, parsedBle.od),
+                odb: pushTimed(prev.odb, parsedBle.odb),
                 hb: pushTimed(prev.hb, parsedBle.hb),
               };
             });
@@ -1454,17 +1517,21 @@ export default function Page() {
             <h2>Performance Diagnostics</h2>
               <div className="perf-grid">
                 <div className="kv"><span>perf stream</span><code>{perfStreamActive ? "active" : "waiting"}</code></div>
-                <div className="kv kv-spark"><span>loop/sec</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lps.length > 1 && <polyline points={perfSparkPointsFor("lps")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.lps ?? "-"}</code></span></div>
-                <div className="kv kv-spark"><span>loop period (lp)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lp.length > 1 && <polyline points={perfSparkPointsFor("lp")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.lp ? `${telemetry.lp} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>loop duration (lu)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lu.length > 1 && <polyline points={perfSparkPointsFor("lu")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.lu ? `${telemetry.lu} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>max loop work (lm)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lm.length > 1 && <polyline points={perfSparkPointsFor("lm")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.lm ? `${telemetry.lm} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>serial in (si)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.si.length > 1 && <polyline points={perfSparkPointsFor("si")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.si ? `${telemetry.si} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>mode update (cm)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.cm.length > 1 && <polyline points={perfSparkPointsFor("cm")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.cm ? `${telemetry.cm} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>pot sample (ps)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.ps.length > 1 && <polyline points={perfSparkPointsFor("ps")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.ps ? `${telemetry.ps} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>servo out (so)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.so.length > 1 && <polyline points={perfSparkPointsFor("so")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.so ? `${telemetry.so} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>status emit (st)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.st.length > 1 && <polyline points={perfSparkPointsFor("st")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.st ? `${telemetry.st} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>oled draw (od)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.od.length > 1 && <polyline points={perfSparkPointsFor("od")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.od ? `${telemetry.od} us` : "-"}</code></span></div>
-                <div className="kv kv-spark"><span>heartbeat (hb)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.hb.length > 1 && <polyline points={perfSparkPointsFor("hb")} className="spark-line spark-line-lu" />}</svg><code>{telemetry.hb ? `${telemetry.hb} us` : "-"}</code></span></div>
+                <div className="kv"><span>value format</span><code>avg | latest</code></div>
+                <div className="kv kv-spark"><span>loop/sec (avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lps.length > 1 && <polyline points={perfSparkPointsFor("lps")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lps")}</code></span></div>
+                <div className="kv kv-spark"><span>loop period (lp avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lp.length > 1 && <polyline points={perfSparkPointsFor("lp")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lp")}</code></span></div>
+                <div className="kv kv-spark"><span>loop period avg (lpa)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lpa.length > 1 && <polyline points={perfSparkPointsFor("lpa")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lpa")}</code></span></div>
+                <div className="kv kv-spark"><span>loop period max (lpm)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lpm.length > 1 && <polyline points={perfSparkPointsFor("lpm")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lpm")}</code></span></div>
+                <div className="kv kv-spark"><span>loop duration (lu avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lu.length > 1 && <polyline points={perfSparkPointsFor("lu")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lu")}</code></span></div>
+                <div className="kv kv-spark"><span>max loop work (lm avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lm.length > 1 && <polyline points={perfSparkPointsFor("lm")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lm")}</code></span></div>
+                <div className="kv kv-spark"><span>serial in (si avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.si.length > 1 && <polyline points={perfSparkPointsFor("si")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("si")}</code></span></div>
+                <div className="kv kv-spark"><span>mode update (cm avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.cm.length > 1 && <polyline points={perfSparkPointsFor("cm")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("cm")}</code></span></div>
+                <div className="kv kv-spark"><span>pot sample (ps avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.ps.length > 1 && <polyline points={perfSparkPointsFor("ps")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("ps")}</code></span></div>
+                <div className="kv kv-spark"><span>servo out (so avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.so.length > 1 && <polyline points={perfSparkPointsFor("so")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("so")}</code></span></div>
+                <div className="kv kv-spark"><span>status emit (st avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.st.length > 1 && <polyline points={perfSparkPointsFor("st")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("st")}</code></span></div>
+                <div className="kv kv-spark"><span>oled draw (od avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.od.length > 1 && <polyline points={perfSparkPointsFor("od")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("od")}</code></span></div>
+                <div className="kv kv-spark"><span>oled bytes (odb avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.odb.length > 1 && <polyline points={perfSparkPointsFor("odb")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("odb")}</code></span></div>
+                <div className="kv kv-spark"><span>heartbeat (hb avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.hb.length > 1 && <polyline points={perfSparkPointsFor("hb")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("hb")}</code></span></div>
               </div>
           </section>
         </div>

@@ -117,11 +117,12 @@ constexpr float POT_ADC_CEILING = 3975.0f;
 constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 64;
 
 constexpr size_t SERIAL_BUFFER_LEN = 64;
-constexpr size_t TELEMETRY_FRAME_BUFFER_LEN = 160;
+constexpr size_t TELEMETRY_FRAME_BUFFER_LEN = 192;
 constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard oscillator drive rate
 // Keep OLED responsive; partial redraw logic in refreshOledStatus() limits
 // redraw work by only updating changed value fields.
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
+constexpr uint32_t OLED_I2C_FAST_HZ = 400000;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
 // Fixed loop tick rate: 500 Hz (2 ms floor per iteration).
@@ -277,6 +278,7 @@ uint8_t oledDirtyXMax = 0;
 uint8_t oledDirtyPageMin = 7;
 uint8_t oledDirtyPageMax = 0;
 bool oledStatusLayoutDrawn = false;
+uint32_t lastOledTransferBytes = 0; // bytes written to SSD1306 on last refresh pass
 ControlMode oledShownMode = ControlMode::Serial;
 bool oledShownGuard = false;
 int oledShownCommandTenths = 32767;
@@ -946,7 +948,7 @@ void initBle() {
  */
 void initOled() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.setClock(400000);
+  Wire.setClock(OLED_I2C_FAST_HZ);
 
   if (oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     oledAvailable = true;
@@ -972,6 +974,11 @@ void initOled() {
   oled.print("I2C 0x");
   oled.println(oledAddress, HEX);
   oled.display();
+
+  // Adafruit_SSD1306 may restore Wire to a slower "after" speed after
+  // library-managed transfers. Re-assert fast mode so our custom partial
+  // flush path runs at the intended bus rate.
+  Wire.setClock(OLED_I2C_FAST_HZ);
 
   Serial.print("OLED detected at 0x");
   Serial.println(oledAddress, HEX);
@@ -1015,9 +1022,9 @@ void markOledDirtyRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
 /**
  * Send a command sequence to the SSD1306 over I2C.
  */
-void oledSendCommands(const uint8_t* cmds, size_t count) {
+size_t oledSendCommands(const uint8_t* cmds, size_t count) {
   if (cmds == nullptr || count == 0) {
-    return;
+    return 0;
   }
   Wire.beginTransmission(oledAddress);
   Wire.write(0x00);
@@ -1025,6 +1032,7 @@ void oledSendCommands(const uint8_t* cmds, size_t count) {
     Wire.write(cmds[i]);
   }
   Wire.endTransmission();
+  return 1u + count; // control byte + command bytes
 }
 
 /**
@@ -1035,39 +1043,49 @@ void oledSendCommands(const uint8_t* cmds, size_t count) {
  */
 void flushOledDirtyRegion() {
   if (!oledAvailable || !oledDirtyRegionActive) {
+    lastOledTransferBytes = 0;
     return;
   }
+
+  // The SSD1306 library can leave Wire at a lower clock after display().
+  // Re-assert fast I2C before direct dirty-region writes.
+  Wire.setClock(OLED_I2C_FAST_HZ);
 
   uint8_t* buffer = oled.getBuffer();
   if (buffer == nullptr) {
     oledDirtyRegionActive = false;
+    lastOledTransferBytes = 0;
     return;
   }
 
   const uint8_t xStart = oledDirtyXMin;
   const uint8_t xEnd = oledDirtyXMax;
+  uint32_t bytesSent = 0;
 
   for (uint8_t page = oledDirtyPageMin; page <= oledDirtyPageMax; ++page) {
     const uint8_t windowCmds[] = { 0x21, xStart, xEnd, 0x22, page, page };
-    oledSendCommands(windowCmds, sizeof(windowCmds));
+    bytesSent += static_cast<uint32_t>(oledSendCommands(windowCmds, sizeof(windowCmds)));
 
     const size_t rowOffset = static_cast<size_t>(page) * 128u;
     size_t src = rowOffset + xStart;
     size_t remaining = static_cast<size_t>(xEnd - xStart + 1);
 
-    // Keep each packet small so it is safe with conservative I2C buffer sizes.
+    // 31-byte payload keeps compatibility with conservative 32-byte Wire buffers
+    // while reducing begin/end transmission overhead versus tiny chunks.
     while (remaining > 0) {
-      const size_t chunk = min<size_t>(remaining, 16u);
+      const size_t chunk = min<size_t>(remaining, 31u);
       Wire.beginTransmission(oledAddress);
       Wire.write(0x40);
       Wire.write(buffer + src, chunk);
       Wire.endTransmission();
+      bytesSent += static_cast<uint32_t>(1u + chunk); // control byte + payload bytes
       src += chunk;
       remaining -= chunk;
     }
   }
 
   oledDirtyRegionActive = false;
+  lastOledTransferBytes = bytesSent;
 }
 
 /**
@@ -1316,8 +1334,16 @@ void loop() {
 
   const uint32_t loopStartUs = micros();
   static uint32_t prevLoopStartUs = 0;
+  static uint64_t sumLoopPeriodUs = 0; // window accumulator for lpa
+  static uint32_t maxLoopPeriodUs = 0; // window maximum for lpm
+  static uint32_t loopPeriodSamples = 0;
   if (prevLoopStartUs != 0) {
     lastLoopPeriodUs = loopStartUs - prevLoopStartUs;
+    sumLoopPeriodUs += static_cast<uint64_t>(lastLoopPeriodUs);
+    if (lastLoopPeriodUs > maxLoopPeriodUs) {
+      maxLoopPeriodUs = lastLoopPeriodUs;
+    }
+    ++loopPeriodSamples;
   }
   prevLoopStartUs = loopStartUs;
 
@@ -1328,6 +1354,7 @@ void loop() {
   static uint32_t maxServoOutputUs = 0;
   static uint32_t maxPrintStatusUs = 0;
   static uint32_t maxOledUs = 0;
+  static uint32_t maxOledBytes = 0;
   static uint32_t maxHeartbeatUs = 0;
   static uint32_t maxLoopWorkUs = 0;
 
@@ -1376,6 +1403,9 @@ void loop() {
   if (oledUs > maxOledUs) {
     maxOledUs = oledUs;
   }
+  if (lastOledTransferBytes > maxOledBytes) {
+    maxOledBytes = lastOledTransferBytes;
+  }
 
   taskStartUs = micros();
   updateHeartbeat();
@@ -1404,13 +1434,21 @@ void loop() {
     // perf=1 frame reports max task durations in the same window.
     // Keys:
     // lp = loop period (most recent) in us
+    // lpa = average loop period over diagnostics window in us
+    // lpm = max loop period over diagnostics window in us
     // lu = previous loop active-work duration in us
     // lm = max loop active-work duration in window in us
     // si/cm/ps/so/st/od/hb = max task duration in window in us
+    // odb = max OLED transfer volume in window (bytes written over I2C)
+    const uint32_t avgLoopPeriodUs = (loopPeriodSamples == 0)
+      ? 0u
+      : static_cast<uint32_t>(sumLoopPeriodUs / static_cast<uint64_t>(loopPeriodSamples));
     char perfFrame[TELEMETRY_FRAME_BUFFER_LEN];
     snprintf(perfFrame, sizeof(perfFrame),
-             "perf=1,lp=%lu,lu=%lu,lm=%lu,si=%lu,cm=%lu,ps=%lu,so=%lu,st=%lu,od=%lu,hb=%lu",
+       "perf=1,lp=%lu,lpa=%lu,lpm=%lu,lu=%lu,lm=%lu,si=%lu,cm=%lu,ps=%lu,so=%lu,st=%lu,od=%lu,odb=%lu,hb=%lu",
              static_cast<unsigned long>(lastLoopPeriodUs),
+         static_cast<unsigned long>(avgLoopPeriodUs),
+         static_cast<unsigned long>(maxLoopPeriodUs),
              static_cast<unsigned long>(lastLoopDurationUs),
              static_cast<unsigned long>(maxLoopWorkUs),
              static_cast<unsigned long>(maxProcessSerialUs),
@@ -1419,6 +1457,7 @@ void loop() {
              static_cast<unsigned long>(maxServoOutputUs),
              static_cast<unsigned long>(maxPrintStatusUs),
              static_cast<unsigned long>(maxOledUs),
+         static_cast<unsigned long>(maxOledBytes),
              static_cast<unsigned long>(maxHeartbeatUs));
     emitTelemetryFrame(perfFrame);
 
@@ -1430,8 +1469,12 @@ void loop() {
     maxServoOutputUs = 0;
     maxPrintStatusUs = 0;
     maxOledUs = 0;
+    maxOledBytes = 0;
     maxHeartbeatUs = 0;
     maxLoopWorkUs = 0;
+    sumLoopPeriodUs = 0;
+    maxLoopPeriodUs = 0;
+    loopPeriodSamples = 0;
   }
 
   lastLoopDurationUs = micros() - loopWorkStartUs;
