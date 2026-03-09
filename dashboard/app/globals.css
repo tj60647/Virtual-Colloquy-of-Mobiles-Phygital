@@ -199,10 +199,21 @@ select {
 .profile-graph svg {
   display: block;
   width: 100%;
-  height: 86px;
+  height: 122px;
   border: 1px solid #e2dfd4;
   border-radius: 8px;
   background: linear-gradient(180deg, #fffef9 0%, #f3efe4 100%);
+}
+
+.profile-subgraph-wrap {
+  display: block;
+}
+
+.profile-subgraph-title {
+  margin: 0 0 4px 2px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 600;
 }
 
 .profile-midline {
@@ -214,8 +225,59 @@ select {
 .profile-wave {
   fill: none;
   stroke: #0b6aa8;
-  stroke-width: 2;
+  stroke-width: 2.4;
   stroke-linecap: round;
+}
+
+.profile-wave-velocity {
+  stroke: #0b6aa8;
+}
+
+.profile-wave-accel {
+  stroke: #c85f2f;
+}
+
+.profile-phase-divider {
+  stroke: #c9c4b5;
+  stroke-width: 0.9;
+  stroke-dasharray: 3 3;
+}
+
+.profile-segment-label {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  fill: #4f5b56;
+  letter-spacing: 0.02em;
+}
+
+.profile-loop-label {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  fill: #4f5b56;
+  letter-spacing: 0.03em;
+}
+
+.profile-axis-label {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 11px;
+  fill: #5f655f;
+}
+
+.profile-graph-legend {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.profile-graph-meta {
+  margin-top: 6px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 input[type="range"] {

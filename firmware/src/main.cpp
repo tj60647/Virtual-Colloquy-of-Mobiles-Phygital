@@ -102,14 +102,14 @@ constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
-// Fixed loop tick rate: 1 kHz (1 ms floor per iteration).
+// Fixed loop tick rate: 500 Hz (2 ms floor per iteration).
 // The spin-wait at the top of loop() ensures a minimum period between
 // iterations. Benefits:
-//   - EMA dt is always ≥ 1 ms, so the 125 ms time constant is predictable.
+//   - EMA dt is always >= 2 ms, so the 125 ms time constant is predictable.
 //   - The BLE FreeRTOS task gets scheduled during the idle spin window
 //     instead of preempting mid-analogRead, keeping ADC timing clean.
 //   - All millis()-gated tasks (telemetry, OLED, heartbeat) fire more evenly.
-constexpr uint32_t LOOP_TICK_US = 1000;
+constexpr uint32_t LOOP_TICK_US = 2000;
 
 // Human-readable firmware version shown on the OLED and startup banner.
 // Increment manually when behaviour-changing changes are flashed.
@@ -202,7 +202,7 @@ uint32_t lastOledRefreshMs = 0;
 uint32_t lastHeartbeatMs   = 0;
 uint32_t lastPotEmaUs      = 0;  // micros() timestamp of last EMA update
 uint32_t lastValidSerialCommandMs = 0;
-int      lastAppliedServoAngle = -1; // tracks last integer angle sent to servo; -1 forces first write
+int      lastAppliedPulseWidthUs = -1; // tracks last pulse width sent to servo; -1 forces first write
 ControlMode currentMode = ControlMode::Serial;
 bool oledAvailable = false;
 uint8_t oledAddress = 0;
@@ -306,6 +306,19 @@ float clampf(float value, float minimum, float maximum) {
     return maximum;
   }
   return value;
+}
+
+/**
+ * Convert a servo angle in degrees (0..180 API space) to pulse width in microseconds.
+ *
+ * This keeps the control path at float precision until the final write boundary,
+ * where the hardware API requires integer microseconds.
+ */
+int pulseWidthFromAngle(float angleDeg) {
+  const float clampedAngle = clampf(angleDeg, 0.0f, 180.0f);
+  const float pulse = static_cast<float>(SERVO_MIN_US) +
+                      (clampedAngle / 180.0f) * static_cast<float>(SERVO_MAX_US - SERVO_MIN_US);
+  return static_cast<int>(roundf(pulse));
 }
 
 /**
@@ -588,8 +601,8 @@ void updatePotSample() {
  * Apply the current command to the servo using cached span-scale.
  *
  * Runs every loop() iteration for responsive command tracking, but skips
- * the servo.write() call when the integer target angle has not changed.
- * This avoids redundant PWM pulse updates and reduces I2C/servo bus chatter.
+ * the servo.writeMicroseconds() call when the target pulse width has not changed.
+ * This avoids redundant PWM updates and reduces servo chatter.
  *
  * Side effects:
  * - Updates appliedAngle.
@@ -612,16 +625,12 @@ void applyServoOutput() {
   appliedAngle = clampf(servoCenter + normalized * servoHalfSpan,
                         SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
 
-  // Only push a new pulse to the servo when the output angle has actually
-  // changed.  servo.write() is not free — it triggers a PWM recalculation
-  // and the servo motor will twitch on any change, so suppressing identical
-  // writes prevents buzzing and saves a little CPU.
-  // roundf → cast avoids the floor-truncation that would make 59.9° write as
-  // 59 instead of 60, causing a systematic low-side bias.
-  const int targetAngle = static_cast<int>(roundf(appliedAngle));
-  if (targetAngle != lastAppliedServoAngle) {
-    pointerServo.write(targetAngle);
-    lastAppliedServoAngle = targetAngle;
+  // Keep internal math at float precision and quantize only at the hardware
+  // boundary where the API requires integer microseconds.
+  const int targetPulseWidthUs = pulseWidthFromAngle(appliedAngle);
+  if (targetPulseWidthUs != lastAppliedPulseWidthUs) {
+    pointerServo.writeMicroseconds(targetPulseWidthUs);
+    lastAppliedPulseWidthUs = targetPulseWidthUs;
   }
 }
 
@@ -743,20 +752,17 @@ void printStatus() {
   // c=-100.0,m=o,g=1,p=4095,pr=4095,a=120.0,rn=120,rx=120,sm=120.0,sx=0.0,pw=2000
   // = ~82 chars + null = 83 — fits comfortably.
   //
-  // Float fields (1 decimal place) expose sub-degree values that the previous
-  // integer logging was hiding. The servo write decision rounds appliedAngle
-  // to the nearest integer, so drift of ±0.5° around a boundary looks like
-  // no change in integer logs but triggers repeated write() calls. The 1dp
-  // format makes that oscillation visible:
+  // Float fields (1 decimal place) expose sub-degree values that integer-only
+  // logging was hiding. The control path writes pulse width directly from the
+  // float angle, so `pw` now reflects the exact commanded hardware pulse width.
   //   c=  — commanded position as received (float, 1dp)
-  //   a=  — appliedAngle before roundf/write (float, 1dp)
+  //   a=  — appliedAngle before pulse-width conversion (float, 1dp)
   //   sm= — range min from unsnapped EMA path (float, 1dp, debug reference)
   //   sx= — range max from unsnapped EMA path (float, 1dp, debug reference)
   // rn=/rx= remain integers — they are intentionally snapped to 5° steps.
   // p=/pr= remain integer ADC counts — already higher resolution than needed.
   char frame[128];
-  const unsigned int pulseWidthUs = static_cast<unsigned int>(
-      SERVO_MIN_US + (lastAppliedServoAngle * (SERVO_MAX_US - SERVO_MIN_US)) / 180);
+  const unsigned int pulseWidthUs = static_cast<unsigned int>(lastAppliedPulseWidthUs);
   snprintf(frame, sizeof(frame),
            "c=%.1f,m=%c,g=%d,p=%u,pr=%u,a=%.1f,rn=%d,rx=%d,sm=%.1f,sx=%.1f,pw=%u",
            commandedPosition,
@@ -962,7 +968,7 @@ void runBootSweep() {
 
   // Update tracking globals so loop() starts from a known position.
   appliedAngle = static_cast<float>(centerAngle);
-  lastAppliedServoAngle = centerAngle;
+  lastAppliedPulseWidthUs = pulseWidthFromAngle(appliedAngle);
   Serial.println("Boot sweep complete.");
 }
 
@@ -999,7 +1005,7 @@ void setup() {
     const int bootCenter = static_cast<int>((SERVO_MIN_ANGLE + SERVO_MAX_ANGLE) * 0.5f);
     pointerServo.write(bootCenter);
     appliedAngle = static_cast<float>(bootCenter);
-    lastAppliedServoAngle = bootCenter;
+    lastAppliedPulseWidthUs = pulseWidthFromAngle(appliedAngle);
   }
 
   // Pump the ADC filter for POT_EMA_SETTLE_MS (4 × tau = 500 ms) so the EMA
@@ -1013,10 +1019,13 @@ void setup() {
       lastSpanScale = readCalibrationSpanScale();
       delay(1);
     }
-    // Sync servo min/max from the now-settled EMA.
-    expectedServoRangeFromScale(lastSpanScale, &lastServoMinAngle, &lastServoMaxAngle);
-    lastExpectedMinAngle = lastServoMinAngle;
-    lastExpectedMaxAngle = lastServoMaxAngle;
+    // Start with a predictable full-span default (rn=0, rx=120).
+    // The live pot-driven range will take over in loop() as updatePotSample()
+    // runs, but startup/boot-sweep behavior begins from the known defaults.
+    lastServoMinAngle = SERVO_MIN_ANGLE;
+    lastServoMaxAngle = SERVO_MAX_ANGLE;
+    lastExpectedMinAngle = SERVO_MIN_ANGLE;
+    lastExpectedMaxAngle = SERVO_MAX_ANGLE;
     Serial.println("Pot filter settled.");
   }
 
@@ -1035,7 +1044,7 @@ void setup() {
 }
 
 /**
- * Arduino main loop entry point — runs at a fixed 1 kHz tick rate.
+ * Arduino main loop entry point — runs at a fixed 500 Hz tick rate.
  *
  * The spin-wait floor at the top paces the loop to exactly 1 ms minimum
  * per iteration. Work non-blocking: each subsystem checks its own timer
@@ -1053,10 +1062,10 @@ void loop() {
   // rare long blocking call), re-anchor one tick behind now rather than spinning
   // forever trying to catch up.
   //
-  // NOTE: With BLE connected, analogRead() runs 2–3× slower (BLE radio spikes
-  // the ADC supply rail), which can push the loop body above 1 ms. In that case
-  // the spin exits immediately and the actual rate will be < 1 kHz — this is
-  // a hardware limitation, not a firmware bug. Typical observed rate: ~875 Hz.
+  // NOTE: With BLE connected, analogRead() runs slower (BLE radio spikes the
+  // ADC supply rail), which can push the loop body above 2 ms. In that case
+  // the spin exits immediately and the actual rate will be < 500 Hz — this is
+  // a hardware limitation, not a firmware bug.
   static uint32_t lastTickUs = 0;
   {
     uint32_t nowUs = micros();
@@ -1076,8 +1085,8 @@ void loop() {
   updateHeartbeat();
 
   // Emit a 1 Hz diagnostics line with the loop rate and firmware version.
-  // lps= (loops per second) shows how close the firmware is to its 1 kHz
-  // target: ~1000 with no BLE client, lower when BLE is active.
+  // lps= (loops per second) shows how close the firmware is to its 500 Hz
+  // target: ~500 with no BLE client, lower when BLE is active.
   // fv= (firmware version) is sent here rather than in every 20 Hz frame
   // because it never changes — once the dashboard receives it once, the
   // merge-semantics update keeps it displayed indefinitely.

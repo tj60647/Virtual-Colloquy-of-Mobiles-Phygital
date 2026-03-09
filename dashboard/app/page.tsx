@@ -49,8 +49,8 @@ const COMMAND_MIN = -100;
 const COMMAND_MAX = 100;
 const OSC_AMPLITUDE_FIXED = 100;
 const DASHBOARD_DRIVE_HZ = 20;
-const PROFILE_GRAPH_WIDTH = 280;
-const PROFILE_GRAPH_HEIGHT = 96;
+const PROFILE_GRAPH_WIDTH = 360;
+const PROFILE_GRAPH_HEIGHT = 120;
 const PROFILE_GRAPH_SAMPLES = 120;
 const SPARK_MAX_POINTS = 80;
 const PW_GRAPH_VIEWBOX_WIDTH = 1000;
@@ -66,6 +66,19 @@ const PW_GRAPH_MAX_US = 2500;
 type TimedSample = {
   tMs: number;
   value: number;
+};
+
+type MotionProfilePreview = {
+  velocityPoints: string;
+  accelerationPoints: string;
+  phaseBoundariesX: number[];
+  accelSec: number;
+  cruiseSec: number;
+  decelSec: number;
+  halfCycleSec: number;
+  fullCycleSec: number;
+  peakVelocity: number;
+  peakAcceleration: number;
 };
 
 // Fixed domain bounds for each sparkline channel.
@@ -263,74 +276,114 @@ function arcPolyline(minDeg: number, maxDeg: number, radius: number): string {
   return points.join(" ");
 }
 
-// Estimate one full trapezoid oscillation period analytically so the preview graph
-// can display complete cycles regardless of amplitude / velocity / accel settings.
-function estimateTrapezoidPeriodSec(amplitude: number, maxVel: number, maxAccel: number): number {
-  if (amplitude < 0.001 || maxVel < 0.001 || maxAccel < 0.001) {
-    return 10;
-  }
-  const dRamp = (maxVel * maxVel) / (2 * maxAccel);
-  const totalTravel = 2 * amplitude;
-  const tRamp = maxVel / maxAccel;
-  const tHalf = 2 * dRamp >= totalTravel
-    ? Math.sqrt(totalTravel / maxAccel)
-    : tRamp + (totalTravel - 2 * dRamp) / maxVel;
-  return 2 * tHalf;
-}
-
-function buildTrapezoidProfilePoints(amplitude: number, maxVel: number, maxAccel: number): string {
+function buildMotionProfilePreview(amplitude: number, maxVel: number, maxAccel: number): MotionProfilePreview {
   const safeAmplitude = clamp(amplitude, 0, 100);
   const safeMaxVel = Math.max(0, maxVel);
   const safeMaxAccel = Math.max(0, maxAccel);
 
-  // Simulate enough real-time steps to cover ~2.2 complete cycles, then downsample.
-  const estimatedPeriod = estimateTrapezoidPeriodSec(safeAmplitude, safeMaxVel, safeMaxAccel);
-  const displayDuration = Math.min(estimatedPeriod * 2.2, 600);
-  const dt = 1 / DASHBOARD_DRIVE_HZ;
-  const totalSteps = Math.ceil(displayDuration / dt);
-
-  let pos = 0;
-  let vel = 0;
-  let target = safeAmplitude;
-  const rawSamples: number[] = new Array(totalSteps);
-
-  for (let step = 0; step < totalSteps; step += 1) {
-    if (safeAmplitude < 0.001 || safeMaxVel < 0.001 || safeMaxAccel < 0.001) {
-      rawSamples[step] = 0;
-    } else {
-      if (Math.abs(pos - target) < 0.5 && Math.abs(vel) < 0.5) {
-        target = target > 0 ? -safeAmplitude : safeAmplitude;
-      }
-
-      const distance = target - pos;
-      const direction = distance >= 0 ? 1 : -1;
-      const brakingDistance = (vel * vel) / (2 * safeMaxAccel);
-      const desiredVelMag = Math.abs(distance) <= Math.abs(brakingDistance)
-        ? Math.sqrt(Math.max(0, 2 * safeMaxAccel * Math.abs(distance)))
-        : safeMaxVel;
-      const desiredVel = direction * desiredVelMag;
-      const maxDv = safeMaxAccel * dt;
-
-      vel += clamp(desiredVel - vel, -maxDv, maxDv);
-      vel = clamp(vel, -safeMaxVel, safeMaxVel);
-      pos = clamp(pos + vel * dt, -safeAmplitude, safeAmplitude);
-
-      if ((pos >= safeAmplitude && vel > 0) || (pos <= -safeAmplitude && vel < 0)) {
-        target = -target;
-      }
-      rawSamples[step] = pos;
+  const velToY = (v: number): number => {
+    if (safeMaxVel < 0.001) {
+      return q(PROFILE_GRAPH_HEIGHT * 0.5);
     }
+    return q((1 - (v + safeMaxVel) / (2 * safeMaxVel)) * PROFILE_GRAPH_HEIGHT);
+  };
+
+  const accToY = (a: number): number => {
+    if (safeMaxAccel < 0.001) {
+      return q(PROFILE_GRAPH_HEIGHT * 0.5);
+    }
+    return q((1 - (a + safeMaxAccel) / (2 * safeMaxAccel)) * PROFILE_GRAPH_HEIGHT);
+  };
+
+  if (safeAmplitude < 0.001 || safeMaxVel < 0.001 || safeMaxAccel < 0.001) {
+    const velFlatY = velToY(0);
+    const accFlatY = accToY(0);
+    return {
+      velocityPoints: `0,${velFlatY} ${PROFILE_GRAPH_WIDTH},${velFlatY}`,
+      accelerationPoints: `0,${accFlatY} ${PROFILE_GRAPH_WIDTH},${accFlatY}`,
+      phaseBoundariesX: [],
+      accelSec: 0,
+      cruiseSec: 0,
+      decelSec: 0,
+      halfCycleSec: 0,
+      fullCycleSec: 0,
+      peakVelocity: 0,
+      peakAcceleration: 0,
+    };
   }
 
-  const points: string[] = [];
-  for (let i = 0; i < PROFILE_GRAPH_SAMPLES; i += 1) {
-    const idx = Math.min(Math.floor((i / (PROFILE_GRAPH_SAMPLES - 1)) * (totalSteps - 1)), totalSteps - 1);
-    const x = q((i / (PROFILE_GRAPH_SAMPLES - 1)) * PROFILE_GRAPH_WIDTH);
-    const y = q((1 - (rawSamples[idx] - COMMAND_MIN) / (COMMAND_MAX - COMMAND_MIN)) * PROFILE_GRAPH_HEIGHT);
-    points.push(`${x},${y}`);
-  }
+  const totalTravel = safeAmplitude * 2;
+  const tRampToMaxVel = safeMaxVel / safeMaxAccel;
+  const dRampAtMaxVel = 0.5 * safeMaxAccel * tRampToMaxVel * tRampToMaxVel;
 
-  return points.join(" ");
+  const triangular = dRampAtMaxVel * 2 >= totalTravel;
+  const accelSec = triangular ? Math.sqrt(totalTravel / safeMaxAccel) : tRampToMaxVel;
+  const cruiseDistance = triangular ? 0 : totalTravel - 2 * dRampAtMaxVel;
+  const cruiseSec = triangular ? 0 : cruiseDistance / safeMaxVel;
+  const decelSec = accelSec;
+  const halfCycleSec = accelSec + cruiseSec + decelSec;
+  const fullCycleSec = halfCycleSec * 2;
+  const peakVel = safeMaxAccel * accelSec;
+
+  const xFromSec = (sec: number): number => q((sec / fullCycleSec) * PROFILE_GRAPH_WIDTH);
+
+  // Exact piecewise velocity profile over one full loop (A -> B -> A).
+  const t0 = 0;
+  const t1 = accelSec;
+  const t2 = accelSec + cruiseSec;
+  const t3 = halfCycleSec;
+  const t4 = halfCycleSec + accelSec;
+  const t5 = halfCycleSec + accelSec + cruiseSec;
+  const t6 = fullCycleSec;
+
+  const velocityPoints = [
+    `${xFromSec(t0)},${velToY(0)}`,
+    `${xFromSec(t1)},${velToY(peakVel)}`,
+    `${xFromSec(t2)},${velToY(peakVel)}`,
+    `${xFromSec(t3)},${velToY(0)}`,
+    `${xFromSec(t4)},${velToY(-peakVel)}`,
+    `${xFromSec(t5)},${velToY(-peakVel)}`,
+    `${xFromSec(t6)},${velToY(0)}`,
+  ];
+
+  // Exact step acceleration profile. Duplicate x at boundaries to force
+  // vertical transitions and avoid fake sloped gaps from interpolation.
+  const accelerationPoints = [
+    `${xFromSec(t0)},${accToY(0)}`,
+    `${xFromSec(t0)},${accToY(safeMaxAccel)}`,
+    `${xFromSec(t1)},${accToY(safeMaxAccel)}`,
+    `${xFromSec(t1)},${accToY(0)}`,
+    `${xFromSec(t2)},${accToY(0)}`,
+    `${xFromSec(t2)},${accToY(-safeMaxAccel)}`,
+    `${xFromSec(t4)},${accToY(-safeMaxAccel)}`,
+    `${xFromSec(t4)},${accToY(0)}`,
+    `${xFromSec(t5)},${accToY(0)}`,
+    `${xFromSec(t5)},${accToY(safeMaxAccel)}`,
+    `${xFromSec(t6)},${accToY(safeMaxAccel)}`,
+    `${xFromSec(t6)},${accToY(0)}`,
+  ];
+
+  const phaseBoundariesSec = [
+    accelSec,
+    accelSec + cruiseSec,
+    halfCycleSec,
+    halfCycleSec + accelSec,
+    halfCycleSec + accelSec + cruiseSec,
+  ];
+  const phaseBoundariesX = phaseBoundariesSec.map((sec) => q((sec / fullCycleSec) * PROFILE_GRAPH_WIDTH));
+
+  return {
+    velocityPoints: velocityPoints.join(" "),
+    accelerationPoints: accelerationPoints.join(" "),
+    phaseBoundariesX,
+    accelSec,
+    cruiseSec,
+    decelSec,
+    halfCycleSec,
+    fullCycleSec,
+    peakVelocity: peakVel,
+    peakAcceleration: safeMaxAccel,
+  };
 }
 
 export default function Page() {
@@ -426,8 +479,8 @@ export default function Page() {
   const rangeMinTip = useMemo(() => pointForDegree(rangeMinDeg, 126), [rangeMinDeg]);
   const rangeMaxTip = useMemo(() => pointForDegree(rangeMaxDeg, 126), [rangeMaxDeg]);
   const activeCenterTip = useMemo(() => pointForDegree(activeRangeCenterDeg, 120), [activeRangeCenterDeg]);
-  const motionProfilePoints = useMemo(
-    () => buildTrapezoidProfilePoints(OSC_AMPLITUDE_FIXED, maxVel, maxAccel),
+  const motionProfile = useMemo(
+    () => buildMotionProfilePreview(OSC_AMPLITUDE_FIXED, maxVel, maxAccel),
     [maxVel, maxAccel]
   );
   const pwNowMs = Date.now();
@@ -744,7 +797,7 @@ export default function Page() {
   return (
     <main className="console-page compact-console">
       <h1>Virtual Colloquy Console</h1>
-      <p>Focused controls: connect, stream data, oscillator profile, and servo arc.</p>
+      <p>Focused controls: connect, stream data, motion profile, and servo arc.</p>
 
       <div className="compact-layout">
         <div className="left-stack">
@@ -780,7 +833,7 @@ export default function Page() {
             {connected && stale && (
               <div className="badge warn" style={{ marginBottom: 4 }}>no data — device may be frozen</div>
             )}
-            <div className="kv"><span>mode</span><code>{telemetry.m === "o" ? "oscillation" : telemetry.m === "s" ? "serial" : "-"}</code></div>
+            <div className="kv"><span>mode</span><code>{telemetry.m === "o" ? "motion profile" : telemetry.m === "s" ? "serial" : "-"}</code></div>
             <div className="kv"><span>guard</span><span className={guardBadgeClass}>{telemetry.g === "1" ? "timeout" : telemetry.g === "0" ? "ok" : "n/a"}</span></div>
             <div className="kv kv-spark">
               <span>command</span>
@@ -841,10 +894,10 @@ export default function Page() {
         </div>
 
         <section className="card panel-tight">
-          <h2>4) Oscillator / Motion Profile</h2>
+          <h2>4) Motion Profile</h2>
           <div className="row" style={{ marginBottom: 8 }}>
             <button className={driveMode === "manual" ? "primary" : ""} onClick={() => activateDriveMode("manual")}>Manual</button>
-            <button className={driveMode === "oscillator" ? "primary" : ""} onClick={() => activateDriveMode("oscillator")}>Oscillator @ {DASHBOARD_DRIVE_HZ} Hz</button>
+            <button className={driveMode === "oscillator" ? "primary" : ""} onClick={() => activateDriveMode("oscillator")}>Auto Motion @ {DASHBOARD_DRIVE_HZ} Hz</button>
           </div>
           <label className="dial-label" htmlFor="command-slider">Command ({commandValue.toFixed(1)})</label>
           <input id="command-slider" type="range" min={COMMAND_MIN} max={COMMAND_MAX} step={0.1} value={commandValue} onChange={(e) => setCommandInput(e.target.value)} disabled={driveMode === "oscillator"} />
@@ -855,11 +908,47 @@ export default function Page() {
           <div className="kv"><span>max velocity (units/s)</span><input type="number" min={0} max={100} step={0.5} value={maxVel} onChange={(e) => setMaxVel(clamp(Number(e.target.value), 0, 100))} disabled={driveMode !== "oscillator"} /></div>
           <div className="kv"><span>max acceleration (units/s²)</span><input type="number" min={0} max={100} step={0.5} value={maxAccel} onChange={(e) => setMaxAccel(clamp(Number(e.target.value), 0, 100))} disabled={driveMode !== "oscillator"} /></div>
           <div className="profile-graph" aria-label="Trapezoidal motion profile preview">
-            <div className="profile-graph-head"><span>trapezoidal command profile</span></div>
-            <svg viewBox={`0 0 ${PROFILE_GRAPH_WIDTH} ${PROFILE_GRAPH_HEIGHT}`} role="img" aria-label="Command versus time graph">
-              <line x1="0" y1={PROFILE_GRAPH_HEIGHT / 2} x2={PROFILE_GRAPH_WIDTH} y2={PROFILE_GRAPH_HEIGHT / 2} className="profile-midline" />
-              <polyline points={motionProfilePoints} className="profile-wave" />
-            </svg>
+            <div className="profile-graph-head"><span>standard motion profile pair: v(t) and a(t)</span></div>
+            <div className="profile-subgraph-wrap">
+              <div className="profile-subgraph-title">velocity v(t)</div>
+              <svg viewBox={`0 0 ${PROFILE_GRAPH_WIDTH} ${PROFILE_GRAPH_HEIGHT}`} role="img" aria-label="Velocity versus time graph">
+                <line x1="0" y1={PROFILE_GRAPH_HEIGHT / 2} x2={PROFILE_GRAPH_WIDTH} y2={PROFILE_GRAPH_HEIGHT / 2} className="profile-midline" />
+                {motionProfile.phaseBoundariesX.map((x) => (
+                  <line key={`v-boundary-${x}`} x1={x} y1="0" x2={x} y2={PROFILE_GRAPH_HEIGHT} className="profile-phase-divider" />
+                ))}
+                <polyline points={motionProfile.velocityPoints} className="profile-wave profile-wave-velocity" />
+                <text x="8" y="14" className="profile-axis-label">+vmax</text>
+                <text x="8" y={q(PROFILE_GRAPH_HEIGHT / 2 - 2)} className="profile-axis-label">0</text>
+                <text x="8" y={q(PROFILE_GRAPH_HEIGHT - 6)} className="profile-axis-label">-vmax</text>
+                <text x="3" y={q(PROFILE_GRAPH_HEIGHT - 4)} className="profile-axis-label">t=0</text>
+                <text x={q(PROFILE_GRAPH_WIDTH - 4)} y={q(PROFILE_GRAPH_HEIGHT - 4)} textAnchor="end" className="profile-axis-label">t=max</text>
+              </svg>
+            </div>
+            <div className="profile-subgraph-wrap" style={{ marginTop: 8 }}>
+              <div className="profile-subgraph-title">acceleration a(t)</div>
+              <svg viewBox={`0 0 ${PROFILE_GRAPH_WIDTH} ${PROFILE_GRAPH_HEIGHT}`} role="img" aria-label="Acceleration versus time graph">
+                <line x1="0" y1={PROFILE_GRAPH_HEIGHT / 2} x2={PROFILE_GRAPH_WIDTH} y2={PROFILE_GRAPH_HEIGHT / 2} className="profile-midline" />
+                {motionProfile.phaseBoundariesX.map((x) => (
+                  <line key={`a-boundary-${x}`} x1={x} y1="0" x2={x} y2={PROFILE_GRAPH_HEIGHT} className="profile-phase-divider" />
+                ))}
+                <polyline points={motionProfile.accelerationPoints} className="profile-wave profile-wave-accel" />
+                <text x="8" y="14" className="profile-axis-label">+amax</text>
+                <text x="8" y={q(PROFILE_GRAPH_HEIGHT / 2 - 2)} className="profile-axis-label">0</text>
+                <text x="8" y={q(PROFILE_GRAPH_HEIGHT - 6)} className="profile-axis-label">-amax</text>
+                <text x="3" y={q(PROFILE_GRAPH_HEIGHT - 4)} className="profile-axis-label">t=0</text>
+                <text x={q(PROFILE_GRAPH_WIDTH - 4)} y={q(PROFILE_GRAPH_HEIGHT - 4)} textAnchor="end" className="profile-axis-label">t=max</text>
+              </svg>
+            </div>
+            <div className="profile-graph-legend">left half: A → B, right half: B → A</div>
+            <div className="profile-graph-meta">
+              <span>vmax {motionProfile.peakVelocity.toFixed(1)} u/s</span>
+              <span>amax {motionProfile.peakAcceleration.toFixed(1)} u/s²</span>
+              <span>accel {motionProfile.accelSec.toFixed(2)}s</span>
+              <span>cruise {motionProfile.cruiseSec.toFixed(2)}s</span>
+              <span>decel {motionProfile.decelSec.toFixed(2)}s</span>
+              <span>A→B {motionProfile.halfCycleSec.toFixed(2)}s</span>
+              <span>A→B→A {motionProfile.fullCycleSec.toFixed(2)}s</span>
+            </div>
           </div>
         </section>
 
