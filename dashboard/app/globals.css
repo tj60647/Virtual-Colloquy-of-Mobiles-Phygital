@@ -459,6 +459,17 @@ input[type="range"] {
   min-width: 130px;
 }
 
+/* Performance Diagnostics needs much longer spark traces than other panels. */
+.perf-grid .spark-cell {
+  min-width: 220px;
+  width: 220px;
+}
+
+/* Keep value text readable while leaving most horizontal room for spark traces. */
+.perf-grid .spark {
+  right: 72px;
+}
+
 /* The sparkline SVG sits behind the value label */
 .spark {
   position: absolute;
