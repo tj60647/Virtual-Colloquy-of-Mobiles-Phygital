@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Colloquy Direction Icon</title>
+  <desc id="desc">Compass-style circle with a directional arrow pointing northeast.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8a8a8a" />
+      <stop offset="1" stop-color="#4f4f4f" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="52" fill="#f4f1e9" />
+  <circle cx="128" cy="128" r="88" fill="none" stroke="url(#bg)" stroke-width="16" />
+  <circle cx="128" cy="128" r="8" fill="#2a2a2a" />
+  <path d="M128 128 L188 68 L170 50 L206 50 L206 86 L188 68 Z" fill="#525252" />
+  <path d="M128 128 L166 90" stroke="#525252" stroke-width="14" stroke-linecap="round" />
+</svg>

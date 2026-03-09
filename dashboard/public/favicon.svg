@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Directional arrow favicon">
+  <rect width="64" height="64" rx="14" fill="#f4f1e9" />
+  <circle cx="32" cy="32" r="21" fill="none" stroke="#6f6f6f" stroke-width="5" />
+  <circle cx="32" cy="32" r="2.8" fill="#2a2a2a" />
+  <path d="M32 32 L46 18 L41 13 L52 13 L52 24 L47 19 Z" fill="#525252" />
+  <path d="M32 32 L41 23" stroke="#525252" stroke-width="4" stroke-linecap="round" />
+</svg>
