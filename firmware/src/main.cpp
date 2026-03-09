@@ -271,6 +271,11 @@ int      lastAppliedPulseWidthUs = -1; // tracks last pulse width sent to servo;
 ControlMode currentMode = ControlMode::Serial;
 bool oledAvailable = false;
 uint8_t oledAddress = 0;
+bool oledDirtyRegionActive = false;
+uint8_t oledDirtyXMin = 127;
+uint8_t oledDirtyXMax = 0;
+uint8_t oledDirtyPageMin = 7;
+uint8_t oledDirtyPageMax = 0;
 bool oledStatusLayoutDrawn = false;
 ControlMode oledShownMode = ControlMode::Serial;
 bool oledShownGuard = false;
@@ -970,6 +975,99 @@ void initOled() {
 
   Serial.print("OLED detected at 0x");
   Serial.println(oledAddress, HEX);
+
+  // Reset incremental redraw state after startup splash.
+  oledDirtyRegionActive = false;
+  oledStatusLayoutDrawn = false;
+}
+
+/**
+ * Mark a rectangular OLED region as dirty (needs transfer to panel).
+ *
+ * Coordinates are in pixel space. SSD1306 memory is page-based (8 px tall),
+ * so y ranges are converted into page ranges for transfer.
+ */
+void markOledDirtyRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
+  if (w == 0 || h == 0) {
+    return;
+  }
+
+  const uint8_t x0 = static_cast<uint8_t>(min<int>(127, x));
+  const uint8_t x1 = static_cast<uint8_t>(min<int>(127, static_cast<int>(x) + static_cast<int>(w) - 1));
+  const uint8_t p0 = static_cast<uint8_t>(min<int>(7, y / 8));
+  const uint8_t p1 = static_cast<uint8_t>(min<int>(7, (static_cast<int>(y) + static_cast<int>(h) - 1) / 8));
+
+  if (!oledDirtyRegionActive) {
+    oledDirtyRegionActive = true;
+    oledDirtyXMin = x0;
+    oledDirtyXMax = x1;
+    oledDirtyPageMin = p0;
+    oledDirtyPageMax = p1;
+    return;
+  }
+
+  oledDirtyXMin = min<uint8_t>(oledDirtyXMin, x0);
+  oledDirtyXMax = max<uint8_t>(oledDirtyXMax, x1);
+  oledDirtyPageMin = min<uint8_t>(oledDirtyPageMin, p0);
+  oledDirtyPageMax = max<uint8_t>(oledDirtyPageMax, p1);
+}
+
+/**
+ * Send a command sequence to the SSD1306 over I2C.
+ */
+void oledSendCommands(const uint8_t* cmds, size_t count) {
+  if (cmds == nullptr || count == 0) {
+    return;
+  }
+  Wire.beginTransmission(oledAddress);
+  Wire.write(0x00);
+  for (size_t i = 0; i < count; ++i) {
+    Wire.write(cmds[i]);
+  }
+  Wire.endTransmission();
+}
+
+/**
+ * Flush only dirty pages/columns from the local framebuffer to the OLED.
+ *
+ * Adafruit_SSD1306 keeps a full local framebuffer. Instead of calling
+ * display() (full transfer), this copies only the dirty bounding region.
+ */
+void flushOledDirtyRegion() {
+  if (!oledAvailable || !oledDirtyRegionActive) {
+    return;
+  }
+
+  uint8_t* buffer = oled.getBuffer();
+  if (buffer == nullptr) {
+    oledDirtyRegionActive = false;
+    return;
+  }
+
+  const uint8_t xStart = oledDirtyXMin;
+  const uint8_t xEnd = oledDirtyXMax;
+
+  for (uint8_t page = oledDirtyPageMin; page <= oledDirtyPageMax; ++page) {
+    const uint8_t windowCmds[] = { 0x21, xStart, xEnd, 0x22, page, page };
+    oledSendCommands(windowCmds, sizeof(windowCmds));
+
+    const size_t rowOffset = static_cast<size_t>(page) * 128u;
+    size_t src = rowOffset + xStart;
+    size_t remaining = static_cast<size_t>(xEnd - xStart + 1);
+
+    // Keep each packet small so it is safe with conservative I2C buffer sizes.
+    while (remaining > 0) {
+      const size_t chunk = min<size_t>(remaining, 16u);
+      Wire.beginTransmission(oledAddress);
+      Wire.write(0x40);
+      Wire.write(buffer + src, chunk);
+      Wire.endTransmission();
+      src += chunk;
+      remaining -= chunk;
+    }
+  }
+
+  oledDirtyRegionActive = false;
 }
 
 /**
@@ -983,6 +1081,7 @@ void drawOledValueRow(uint8_t y, uint8_t valueX, const char* valueText) {
   oled.fillRect(valueX, y, clearWidth, 8, SSD1306_BLACK);
   oled.setCursor(valueX, y);
   oled.print(valueText);
+  markOledDirtyRect(valueX, y, static_cast<uint8_t>(clearWidth), 8);
 }
 
 /**
@@ -1021,6 +1120,7 @@ void refreshOledStatus() {
     oled.setCursor(0, 48);
     oled.println("Angle deg:");
     oledStatusLayoutDrawn = true;
+    markOledDirtyRect(0, 0, 128, 64);
     dirty = true;
   }
 
@@ -1069,7 +1169,7 @@ void refreshOledStatus() {
   }
 
   if (dirty) {
-    oled.display();
+    flushOledDirtyRegion();
   }
 }
 
