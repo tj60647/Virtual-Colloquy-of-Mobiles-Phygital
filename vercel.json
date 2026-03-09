@@ -5,5 +5,15 @@
       "src": "dashboard/package.json",
       "use": "@vercel/next"
     }
+  ],
+  "routes": [
+    {
+      "src": "^/$",
+      "dest": "/dashboard"
+    },
+    {
+      "src": "^/(?!dashboard(?:/|$))(.*)$",
+      "dest": "/dashboard/$1"
+    }
   ]
 }
