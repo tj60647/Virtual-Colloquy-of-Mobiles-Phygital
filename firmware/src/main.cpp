@@ -65,40 +65,62 @@ constexpr uint8_t I2C_SCL_PIN = SCL;
 
 // MG996R pulse calibration.
 //
-// The MG996R travels approximately 120° total (60° each side of center) across
-// the standard 1 ms – 2 ms pulse range at 50 Hz.
+// The MG996R travels approximately 180° total (90° each side of center) across
+// a standard 0.5 ms – 2.5 ms pulse range at 50 Hz.
 //
 // ESP32Servo maps write(0)→MIN_US and write(180)→MAX_US internally (0–180
-// degree range hard-coded in the library). To make write(0)=1000 µs and
-// write(120)=2000 µs we set MAX_US=2500 µs:
-//   1000 + (120/180) × (2500–1000) = 1000 + 1000 = 2000 µs ✓
+// degree range hard-coded in the library). To make write(0)=500 µs and
+// write(180)=2500 µs we set MIN_US=500 and MAX_US=2500. 
+// This gives the servo a full 2000 µs span to work with.
 // The angle clamp on [SERVO_MIN_ANGLE, SERVO_MAX_ANGLE] ensures we never
-// actually command above 120°, so the servo never sees more than 2000 µs.
+// actually command above 180°, so the servo never sees more than 2500 µs.
 //
 // Dead band: 5 µs (datasheet) — very fine resolution.
-constexpr int SERVO_MIN_US = 1000;  // 0°  → 1000 µs
-constexpr int SERVO_MAX_US = 2500;  // calibration anchor so write(120) → 2000 µs
+constexpr int SERVO_MIN_US = 500; 
+constexpr int SERVO_MAX_US = 2500;  
 
 // Physical rotation range of the MG996R.
-// Center is 60° (half of 120°). Potentiometer at maximum collapses travel to center.
+// Center is 90° (half of 180°). Potentiometer at maximum collapses travel to center.
 constexpr float SERVO_MIN_ANGLE = 0.0f;
-constexpr float SERVO_MAX_ANGLE = 120.0f;
+constexpr float SERVO_MAX_ANGLE = 180.0f;
 
 constexpr float COMMAND_MIN = -100.0f;
 constexpr float COMMAND_MAX = 100.0f;
 
 // Potentiometer controls how much of the available servo span is used.
 // User request mapping:
-// - pot at 0    => full range (span scale = 1.0) → servo sweeps 0°–120°
-// - pot at max  => zero range, hold center (60°) (span scale = 0.0)
+// - pot at 0    => full range (span scale = 1.0) -> servo sweeps 0°..180°
+// - pot at max  => zero range, hold center (90°) (span scale = 0.0)
 constexpr float CALIBRATION_SPAN_MIN_SCALE = 0.0f;
 constexpr float CALIBRATION_SPAN_MAX_SCALE = 1.0f;
+
+// Pot ADC endpoint calibration.
+// Real knobs often do not reach 0 or 4095 at their mechanical limits because
+// of tolerances and resistor end-stop behavior. We remap the usable interval
+// [POT_ADC_FLOOR, POT_ADC_CEILING] to [0..1] so the full servo span is still
+// reachable at both ends.
+//
+// Example with defaults below:
+// - EMA <= 120  => treated as 0.0 (full span)
+// - EMA >= 3975 => treated as 1.0 before inversion (collapsed span)
+//
+// Tune these on bench if needed:
+// 1) Turn pot to one hard stop, note stable p= in telemetry -> floor.
+// 2) Turn to the other hard stop, note stable p= -> ceiling.
+// 3) Set floor slightly above observed minimum and ceiling slightly below
+//    observed maximum so endpoints are reachable without jitter chatter.
+constexpr float POT_ADC_FLOOR = 120.0f;
+constexpr float POT_ADC_CEILING = 3975.0f;
+
 // 64 samples gives a wider averaging window to better reject BLE radio
 // interference, which causes ESP32 ADC spikes that outlast shorter windows.
 constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 64;
 
 constexpr size_t SERIAL_BUFFER_LEN = 64;
+constexpr size_t TELEMETRY_FRAME_BUFFER_LEN = 160;
 constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard oscillator drive rate
+// Keep OLED responsive; partial redraw logic in refreshOledStatus() limits
+// redraw work by only updating changed value fields.
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 
@@ -110,6 +132,47 @@ constexpr uint32_t SERIAL_COMMAND_TIMEOUT_MS = 1500;
 //     instead of preempting mid-analogRead, keeping ADC timing clean.
 //   - All millis()-gated tasks (telemetry, OLED, heartbeat) fire more evenly.
 constexpr uint32_t LOOP_TICK_US = 2000;
+
+/**
+ * Wait until the next fixed-rate loop deadline.
+ *
+ * Deadline model (nextTickUs) is easier to reason about than "last tick" and
+ * is robust across micros() wrap-around by using signed time deltas.
+ *
+ * Behavior:
+ * - First call initializes the first deadline one tick in the future.
+ * - If we are late by a small amount, skip missed deadlines until the next
+ *   future slot (catch-up without long blocking).
+ * - If we are very late (>8 ticks), re-anchor one tick ahead of now.
+ */
+void waitForNextTick() {
+  static uint32_t nextTickUs = 0;
+  static bool initialized = false;
+
+  const uint32_t nowUs = micros();
+
+  if (!initialized) {
+    nextTickUs = nowUs + LOOP_TICK_US;
+    initialized = true;
+  }
+
+  const int32_t lateUs = static_cast<int32_t>(nowUs - nextTickUs);
+  if (lateUs >= 0) {
+    if (static_cast<uint32_t>(lateUs) > LOOP_TICK_US * 8u) {
+      nextTickUs = nowUs + LOOP_TICK_US;
+    } else {
+      do {
+        nextTickUs += LOOP_TICK_US;
+      } while (static_cast<int32_t>(nowUs - nextTickUs) >= 0);
+    }
+    return;
+  }
+
+  while (static_cast<int32_t>(micros() - nextTickUs) < 0) {
+    // Busy-wait until the scheduled deadline.
+  }
+  nextTickUs += LOOP_TICK_US;
+}
 
 // Human-readable firmware version shown on the OLED and startup banner.
 // Increment manually when behaviour-changing changes are flashed.
@@ -190,7 +253,7 @@ char serialBuffer[SERIAL_BUFFER_LEN] = {0};
 size_t serialBufferPos = 0;
 
 float commandedPosition = 0.0f;
-float appliedAngle = 60.0f;  // start at center of MG996R 120° range
+float appliedAngle = 90.0f;  // start at center of MG996R 180° range
 uint16_t lastPotRaw = 0;     // raw ADC sample, preserved for debug telemetry (pr=)
 uint16_t lastPotAverage = 0; // box-filter output (stage 1)
 float    lastPotEma = 0.0f;  // EMA output (stage 2) — this is what the servo uses
@@ -201,11 +264,20 @@ uint32_t lastStatusPrintMs = 0;
 uint32_t lastOledRefreshMs = 0;
 uint32_t lastHeartbeatMs   = 0;
 uint32_t lastPotEmaUs      = 0;  // micros() timestamp of last EMA update
+uint32_t lastLoopDurationUs = 0; // loop active-work duration from prior iteration (microseconds)
+uint32_t lastLoopPeriodUs = 0;   // loop-to-loop period (microseconds)
 uint32_t lastValidSerialCommandMs = 0;
 int      lastAppliedPulseWidthUs = -1; // tracks last pulse width sent to servo; -1 forces first write
 ControlMode currentMode = ControlMode::Serial;
 bool oledAvailable = false;
 uint8_t oledAddress = 0;
+bool oledStatusLayoutDrawn = false;
+ControlMode oledShownMode = ControlMode::Serial;
+bool oledShownGuard = false;
+int oledShownCommandTenths = 32767;
+int oledShownRangeMinDeg = 1000;
+int oledShownRangeMaxDeg = 1000;
+int oledShownAngleDeg = 1000;
 bool serialTimeoutGuardActive = false;
 uint16_t potFilterBuffer[POT_RUNNING_AVERAGE_SAMPLES] = {0};
 size_t potFilterIndex = 0;
@@ -397,7 +469,10 @@ float readCalibrationSpanScale() {
     }
   }
 
-  const float unit     = lastPotEma / 4095.0f;
+  const float adcSpan = POT_ADC_CEILING - POT_ADC_FLOOR;
+  const float unit = (adcSpan > 1.0f)
+      ? clampf((lastPotEma - POT_ADC_FLOOR) / adcSpan, 0.0f, 1.0f)
+      : clampf(lastPotEma / 4095.0f, 0.0f, 1.0f);
   const float inverted = 1.0f - unit;
   return clampf(inverted, CALIBRATION_SPAN_MIN_SCALE,
                 CALIBRATION_SPAN_MAX_SCALE);
@@ -725,6 +800,39 @@ void updateControlModeAndCommand() {
 }
 
 /**
+ * Emit one telemetry frame over all active transports.
+ *
+ * Serial and BLE must carry the same key=value payload so the dashboard sees
+ * identical data regardless of connection type. Newline framing is added per
+ * transport to preserve line-based parsing.
+ *
+ * @param frame Null-terminated telemetry frame without trailing newline.
+ */
+void emitTelemetryFrame(const char* frame) {
+  if (frame == nullptr) {
+    return;
+  }
+
+  // Serial line framing.
+  Serial.println(frame);
+
+  // BLE line framing using the same payload bytes plus '\n'.
+  if (bleClientConnected && bleTxCharacteristic != nullptr) {
+    char frameNl[TELEMETRY_FRAME_BUFFER_LEN + 2];
+    const int written = snprintf(frameNl, sizeof(frameNl), "%s\n", frame);
+    if (written <= 0) {
+      return;
+    }
+    size_t bytesToSend = static_cast<size_t>(written);
+    if (bytesToSend >= sizeof(frameNl)) {
+      bytesToSend = sizeof(frameNl) - 1;
+    }
+    bleTxCharacteristic->setValue(reinterpret_cast<uint8_t*>(frameNl), bytesToSend);
+    bleTxCharacteristic->notify();
+  }
+}
+
+/**
  * Emit periodic telemetry to serial monitor.
  *
  * Format: compact key=value pairs as defined in the root AGENTS.md protocol spec.
@@ -738,6 +846,7 @@ void updateControlModeAndCommand() {
  *   a  = applied servo angle in degrees (0..180)
  *   rn = pot-scaled range minimum angle in degrees (0..180)
  *   rx = pot-scaled range maximum angle in degrees (0..180)
+ *   lu = previous loop active-work duration in microseconds
  */
 void printStatus() {
   const uint32_t now = millis();
@@ -748,9 +857,9 @@ void printStatus() {
   lastStatusPrintMs = now;
 
   // Build the telemetry frame once and route to all active transports.
-  // Frame budget check (buffer is 128 bytes):
-  // c=-100.0,m=o,g=1,p=4095,pr=4095,a=120.0,rn=120,rx=120,sm=120.0,sx=0.0,pw=2000
-  // = ~82 chars + null = 83 — fits comfortably.
+  // Frame budget check (buffer is 160 bytes):
+  // c=-100.0,m=o,g=1,p=4095,pr=4095,a=180.0,rn=180,rx=180,sm=180.0,sx=0.0,pw=2500,lu=2000
+  // = ~95 chars + null = 96 — fits comfortably.
   //
   // Float fields (1 decimal place) expose sub-degree values that integer-only
   // logging was hiding. The control path writes pulse width directly from the
@@ -761,10 +870,11 @@ void printStatus() {
   //   sx= — range max from unsnapped EMA path (float, 1dp, debug reference)
   // rn=/rx= remain integers — they are intentionally snapped to 5° steps.
   // p=/pr= remain integer ADC counts — already higher resolution than needed.
-  char frame[128];
+  char frame[TELEMETRY_FRAME_BUFFER_LEN];
   const unsigned int pulseWidthUs = static_cast<unsigned int>(lastAppliedPulseWidthUs);
+  const unsigned long loopDurationUs = static_cast<unsigned long>(lastLoopDurationUs);
   snprintf(frame, sizeof(frame),
-           "c=%.1f,m=%c,g=%d,p=%u,pr=%u,a=%.1f,rn=%d,rx=%d,sm=%.1f,sx=%.1f,pw=%u",
+           "c=%.1f,m=%c,g=%d,p=%u,pr=%u,a=%.1f,rn=%d,rx=%d,sm=%.1f,sx=%.1f,pw=%u,lu=%lu",
            commandedPosition,
            currentMode == ControlMode::Oscillation ? 'o' : 's',
            serialTimeoutGuardActive ? 1 : 0,
@@ -775,18 +885,10 @@ void printStatus() {
            toWholeDegrees(lastExpectedMaxAngle),
            lastServoMinAngle,
            lastServoMaxAngle,
-           pulseWidthUs);
+           pulseWidthUs,
+           loopDurationUs);
 
-  Serial.println(frame);
-
-  // Notify BLE client if one is connected. Append \n so the dashboard
-  // line-split parser treats this the same as a USB serial line.
-  if (bleClientConnected && bleTxCharacteristic != nullptr) {
-    char frameNl[130];
-    snprintf(frameNl, sizeof(frameNl), "%s\n", frame);
-    bleTxCharacteristic->setValue(reinterpret_cast<uint8_t*>(frameNl), strlen(frameNl));
-    bleTxCharacteristic->notify();
-  }
+  emitTelemetryFrame(frame);
 }
 
 /**
@@ -871,6 +973,19 @@ void initOled() {
 }
 
 /**
+ * Draw a dynamic OLED value field by clearing only that row segment first.
+ *
+ * This avoids clearing the full display buffer on every refresh. We keep
+ * static labels intact and only rewrite value regions that changed.
+ */
+void drawOledValueRow(uint8_t y, uint8_t valueX, const char* valueText) {
+  const int16_t clearWidth = 128 - valueX;
+  oled.fillRect(valueX, y, clearWidth, 8, SSD1306_BLACK);
+  oled.setCursor(valueX, y);
+  oled.print(valueText);
+}
+
+/**
  * Refresh OLED status panel at a bounded update rate.
  *
  * Side effects:
@@ -888,30 +1003,74 @@ void refreshOledStatus() {
   }
   lastOledRefreshMs = now;
 
-  oled.clearDisplay();
-  oled.setCursor(0, 0);
-  oled.println("Virtual Colloquy");
-  oled.print("fw v");
-  oled.println(FIRMWARE_VERSION);
+  bool dirty = false;
+  if (!oledStatusLayoutDrawn) {
+    oled.clearDisplay();
+    oled.setCursor(0, 0);
+    oled.println("Virtual Colloquy");
+    oled.print("fw v");
+    oled.println(FIRMWARE_VERSION);
+    oled.setCursor(0, 16);
+    oled.println("Control mode:");
+    oled.setCursor(0, 24);
+    oled.println("Safety guard:");
+    oled.setCursor(0, 32);
+    oled.println("Command:");
+    oled.setCursor(0, 40);
+    oled.println("Range:");
+    oled.setCursor(0, 48);
+    oled.println("Angle deg:");
+    oledStatusLayoutDrawn = true;
+    dirty = true;
+  }
 
-  oled.print("Control mode: ");
-  oled.println(currentMode == ControlMode::Oscillation ? "osc" : "serial");
+  const ControlMode modeNow = currentMode;
+  const bool guardNow = serialTimeoutGuardActive;
+  const int commandTenthsNow = static_cast<int>(roundf(commandedPosition * 10.0f));
+  const int rangeMinNow = toWholeDegrees(lastExpectedMinAngle);
+  const int rangeMaxNow = toWholeDegrees(lastExpectedMaxAngle);
+  const int angleNow = toWholeDegrees(appliedAngle);
 
-  oled.print("Safety guard: ");
-  oled.println(serialTimeoutGuardActive ? "timeout" : "ok");
+  if (modeNow != oledShownMode) {
+    drawOledValueRow(16, 78, modeNow == ControlMode::Oscillation ? "osc" : "serial");
+    oledShownMode = modeNow;
+    dirty = true;
+  }
 
-  oled.print("Command: ");
-  oled.println(commandedPosition, 1);
+  if (guardNow != oledShownGuard) {
+    drawOledValueRow(24, 74, guardNow ? "timeout" : "ok");
+    oledShownGuard = guardNow;
+    dirty = true;
+  }
 
-  oled.print("Range: ");
-  oled.print(toWholeDegrees(lastExpectedMinAngle));
-  oled.print("-");
-  oled.println(toWholeDegrees(lastExpectedMaxAngle));
+  if (commandTenthsNow != oledShownCommandTenths) {
+    char valueBuf[16];
+    snprintf(valueBuf, sizeof(valueBuf), "%.1f", commandedPosition);
+    drawOledValueRow(32, 52, valueBuf);
+    oledShownCommandTenths = commandTenthsNow;
+    dirty = true;
+  }
 
-  oled.print("Angle deg: ");
-  oled.println(toWholeDegrees(appliedAngle));
+  if (rangeMinNow != oledShownRangeMinDeg || rangeMaxNow != oledShownRangeMaxDeg) {
+    char valueBuf[24];
+    snprintf(valueBuf, sizeof(valueBuf), "%d-%d", rangeMinNow, rangeMaxNow);
+    drawOledValueRow(40, 38, valueBuf);
+    oledShownRangeMinDeg = rangeMinNow;
+    oledShownRangeMaxDeg = rangeMaxNow;
+    dirty = true;
+  }
 
-  oled.display();
+  if (angleNow != oledShownAngleDeg) {
+    char valueBuf[12];
+    snprintf(valueBuf, sizeof(valueBuf), "%d", angleNow);
+    drawOledValueRow(48, 62, valueBuf);
+    oledShownAngleDeg = angleNow;
+    dirty = true;
+  }
+
+  if (dirty) {
+    oled.display();
+  }
 }
 
 /**
@@ -1019,7 +1178,7 @@ void setup() {
       lastSpanScale = readCalibrationSpanScale();
       delay(1);
     }
-    // Start with a predictable full-span default (rn=0, rx=120).
+    // Start with a predictable full-span default (rn=0, rx=180).
     // The live pot-driven range will take over in loop() as updatePotSample()
     // runs, but startup/boot-sweep behavior begins from the known defaults.
     lastServoMinAngle = SERVO_MIN_ANGLE;
@@ -1046,58 +1205,137 @@ void setup() {
 /**
  * Arduino main loop entry point — runs at a fixed 500 Hz tick rate.
  *
- * The spin-wait floor at the top paces the loop to exactly 1 ms minimum
+ * The tick scheduler at the top paces the loop to exactly 2 ms minimum
  * per iteration. Work non-blocking: each subsystem checks its own timer
  * and returns immediately if it is not yet due.
  */
 void loop() {
-  // Phase-coherent spin-wait: advance the tick anchor by exactly LOOP_TICK_US
-  // each iteration rather than snapping to micros(). This means a short overrun
-  // (e.g. one slow analogRead when BLE radio is active) is automatically made up
-  // by a shorter spin on the next tick, keeping the long-run average at exactly
-  // LOOP_TICK_US. By contrast, lastTickUs = micros() after the spin would
-  // "forgive" every overrun and let the rate slip permanently.
-  //
-  // Drift guard: if we fall more than 8 ticks behind real time (first run, or a
-  // rare long blocking call), re-anchor one tick behind now rather than spinning
-  // forever trying to catch up.
-  //
-  // NOTE: With BLE connected, analogRead() runs slower (BLE radio spikes the
-  // ADC supply rail), which can push the loop body above 2 ms. In that case
-  // the spin exits immediately and the actual rate will be < 500 Hz — this is
-  // a hardware limitation, not a firmware bug.
-  static uint32_t lastTickUs = 0;
-  {
-    uint32_t nowUs = micros();
-    if ((nowUs - lastTickUs) > LOOP_TICK_US * 8u) {
-      lastTickUs = nowUs - LOOP_TICK_US;  // re-anchor one tick behind current time
-    }
-    while ((micros() - lastTickUs) < LOOP_TICK_US) { /* spin */ }
-    lastTickUs += LOOP_TICK_US;
+  // NOTE: This scheduler keeps phase-coherent deadlines, but it cannot force
+  // 500 Hz when loop work itself exceeds 2 ms. In that case lps will read <500.
+  waitForNextTick();
+
+  const uint32_t loopStartUs = micros();
+  static uint32_t prevLoopStartUs = 0;
+  if (prevLoopStartUs != 0) {
+    lastLoopPeriodUs = loopStartUs - prevLoopStartUs;
+  }
+  prevLoopStartUs = loopStartUs;
+
+  // 1-second diagnostics accumulators (max task duration per window).
+  static uint32_t maxProcessSerialUs = 0;
+  static uint32_t maxModeUpdateUs = 0;
+  static uint32_t maxPotSampleUs = 0;
+  static uint32_t maxServoOutputUs = 0;
+  static uint32_t maxPrintStatusUs = 0;
+  static uint32_t maxOledUs = 0;
+  static uint32_t maxHeartbeatUs = 0;
+  static uint32_t maxLoopWorkUs = 0;
+
+  // Keep lastLoopDurationUs as the prior loop's measured duration until the
+  // end of this loop, so telemetry reports a real, non-zero previous sample.
+  const uint32_t loopWorkStartUs = loopStartUs;
+
+  uint32_t taskStartUs = micros();
+  processSerialInput();
+  const uint32_t processSerialUs = micros() - taskStartUs;
+  if (processSerialUs > maxProcessSerialUs) {
+    maxProcessSerialUs = processSerialUs;
   }
 
-  processSerialInput();
+  taskStartUs = micros();
   updateControlModeAndCommand();
+  const uint32_t modeUpdateUs = micros() - taskStartUs;
+  if (modeUpdateUs > maxModeUpdateUs) {
+    maxModeUpdateUs = modeUpdateUs;
+  }
+
+  taskStartUs = micros();
   updatePotSample();    // every tick — feeds ADC samples into the 125 ms EMA window
+  const uint32_t potSampleUs = micros() - taskStartUs;
+  if (potSampleUs > maxPotSampleUs) {
+    maxPotSampleUs = potSampleUs;
+  }
+
+  taskStartUs = micros();
   applyServoOutput();   // every tick, but servo.write() only on angle change
+  const uint32_t servoOutputUs = micros() - taskStartUs;
+  if (servoOutputUs > maxServoOutputUs) {
+    maxServoOutputUs = servoOutputUs;
+  }
+
+  taskStartUs = micros();
   printStatus();
+  const uint32_t printStatusUs = micros() - taskStartUs;
+  if (printStatusUs > maxPrintStatusUs) {
+    maxPrintStatusUs = printStatusUs;
+  }
+
+  taskStartUs = micros();
   refreshOledStatus();
+  const uint32_t oledUs = micros() - taskStartUs;
+  if (oledUs > maxOledUs) {
+    maxOledUs = oledUs;
+  }
+
+  taskStartUs = micros();
   updateHeartbeat();
+  const uint32_t heartbeatUs = micros() - taskStartUs;
+  if (heartbeatUs > maxHeartbeatUs) {
+    maxHeartbeatUs = heartbeatUs;
+  }
 
   // Emit a 1 Hz diagnostics line with the loop rate and firmware version.
-  // lps= (loops per second) shows how close the firmware is to its 500 Hz
-  // target: ~500 with no BLE client, lower when BLE is active.
+  // lps= uses elapsed wall time across the 1-second window instead of a
+  // fixed 1000 ms assumption, avoiding bucket-boundary math artifacts.
   // fv= (firmware version) is sent here rather than in every 20 Hz frame
   // because it never changes — once the dashboard receives it once, the
   // merge-semantics update keeps it displayed indefinitely.
   static uint32_t dbgCount = 0;
   static uint32_t dbgLastMs = 0;
+  const uint32_t nowMs = millis();
   ++dbgCount;
-  if (millis() - dbgLastMs >= 1000) {
+  if (nowMs - dbgLastMs >= 1000) {
+    const uint32_t elapsedMs = (dbgLastMs == 0) ? 1000u : (nowMs - dbgLastMs);
+    const uint32_t loopsPerSecond = static_cast<uint32_t>((static_cast<float>(dbgCount) * 1000.0f / static_cast<float>(elapsedMs)) + 0.5f);
     char lpsFrame[32];
-    snprintf(lpsFrame, sizeof(lpsFrame), "lps=%u,fv=%s", dbgCount, FIRMWARE_VERSION);
-    Serial.println(lpsFrame);
+    snprintf(lpsFrame, sizeof(lpsFrame), "lps=%u,fv=%s", loopsPerSecond, FIRMWARE_VERSION);
+    emitTelemetryFrame(lpsFrame);
+
+    // perf=1 frame reports max task durations in the same window.
+    // Keys:
+    // lp = loop period (most recent) in us
+    // lu = previous loop active-work duration in us
+    // lm = max loop active-work duration in window in us
+    // si/cm/ps/so/st/od/hb = max task duration in window in us
+    char perfFrame[TELEMETRY_FRAME_BUFFER_LEN];
+    snprintf(perfFrame, sizeof(perfFrame),
+             "perf=1,lp=%lu,lu=%lu,lm=%lu,si=%lu,cm=%lu,ps=%lu,so=%lu,st=%lu,od=%lu,hb=%lu",
+             static_cast<unsigned long>(lastLoopPeriodUs),
+             static_cast<unsigned long>(lastLoopDurationUs),
+             static_cast<unsigned long>(maxLoopWorkUs),
+             static_cast<unsigned long>(maxProcessSerialUs),
+             static_cast<unsigned long>(maxModeUpdateUs),
+             static_cast<unsigned long>(maxPotSampleUs),
+             static_cast<unsigned long>(maxServoOutputUs),
+             static_cast<unsigned long>(maxPrintStatusUs),
+             static_cast<unsigned long>(maxOledUs),
+             static_cast<unsigned long>(maxHeartbeatUs));
+    emitTelemetryFrame(perfFrame);
+
     dbgCount = 0;
-    dbgLastMs = millis();
+    dbgLastMs = nowMs;
+    maxProcessSerialUs = 0;
+    maxModeUpdateUs = 0;
+    maxPotSampleUs = 0;
+    maxServoOutputUs = 0;
+    maxPrintStatusUs = 0;
+    maxOledUs = 0;
+    maxHeartbeatUs = 0;
+    maxLoopWorkUs = 0;
+  }
+
+  lastLoopDurationUs = micros() - loopWorkStartUs;
+  if (lastLoopDurationUs > maxLoopWorkUs) {
+    maxLoopWorkUs = lastLoopDurationUs;
   }
 }

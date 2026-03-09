@@ -24,7 +24,8 @@ body {
 }
 
 main {
-  max-width: 1400px;
+  max-width: none;
+  width: 100%;
   margin: 0 auto;
   padding: 14px;
 }
@@ -56,15 +57,31 @@ p {
   max-width: 900px;
 }
 
+.console-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.console-header h1 {
+  margin: 0;
+}
+
+.console-header p {
+  max-width: none;
+}
+
 .compact-console {
-  /* No hard height cap; panels size to their content. */
+  display: flex;
+  flex-direction: column;
 }
 
 .compact-layout {
   margin-top: 10px;
   display: grid;
-  grid-template-columns: 360px 360px minmax(420px, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   align-items: start;
 }
 
@@ -72,6 +89,43 @@ p {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
+}
+
+.perf-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.motion-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.servo-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.perf-panel-card {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.perf-grid {
+  margin-top: 4px;
+}
+
+.perf-grid .kv {
+  font-size: 0.82rem;
+  margin-bottom: 0;
+  padding: 2px 0;
 }
 
 .panel-tight {
@@ -166,6 +220,54 @@ input[type="range"] {
   font: inherit;
 }
 
+.command-slider-wrap {
+  position: relative;
+  width: 90%;
+  margin: 2px auto 0;
+  padding-bottom: 16px;
+  overflow: hidden;
+}
+
+.command-slider {
+  padding: 0;
+  margin: 0;
+}
+
+.command-send-row {
+  flex-wrap: nowrap;
+}
+
+.command-send-row input[type="text"] {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.command-send-row button {
+  flex: 0 0 auto;
+}
+
+.command-bound-marker {
+  position: absolute;
+  top: 2px;
+  width: 2px;
+  height: 18px;
+  background: #1d2421;
+  transform: translateX(-1px);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.command-bound-label {
+  position: absolute;
+  top: 21px;
+  transform: translateX(-50%);
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1;
+  pointer-events: none;
+}
+
 select {
   width: 100%;
   border: 1px solid var(--line);
@@ -199,7 +301,7 @@ select {
 .profile-graph svg {
   display: block;
   width: 100%;
-  height: 122px;
+  height: 108px;
   border: 1px solid #e2dfd4;
   border-radius: 8px;
   background: linear-gradient(180deg, #fffef9 0%, #f3efe4 100%);
@@ -220,6 +322,19 @@ select {
   stroke: #b8b4a6;
   stroke-width: 1;
   stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.profile-limitline {
+  stroke: #d7d2c4;
+  stroke-width: 0.9;
+  vector-effect: non-scaling-stroke;
+}
+
+.profile-plot-boundary {
+  fill: none;
+  stroke: #d8d4c8;
+  stroke-width: 1;
 }
 
 .profile-wave {
@@ -237,10 +352,40 @@ select {
   stroke: #c85f2f;
 }
 
+.profile-wave-position {
+  stroke: #007f5f;
+}
+
+.profile-marker {
+  stroke-width: 1.2;
+}
+
+.profile-marker-generated {
+  fill: #fffef9;
+  stroke: #2f3a35;
+}
+
+.profile-marker-live {
+  stroke: #ffffff;
+}
+
+.profile-marker-velocity {
+  fill: #0b6aa8;
+}
+
+.profile-marker-accel {
+  fill: #c85f2f;
+}
+
+.profile-marker-position {
+  fill: #007f5f;
+}
+
 .profile-phase-divider {
   stroke: #c9c4b5;
   stroke-width: 0.9;
   stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
 }
 
 .profile-segment-label {
@@ -350,6 +495,10 @@ input[type="range"] {
   stroke: #2b6cb0;
 }
 
+.spark-line-lu {
+  stroke: #7a4b8f;
+}
+
 .kv:last-child {
   border-bottom: none;
 }
@@ -391,30 +540,47 @@ details > summary {
   display: grid;
   gap: 14px;
   align-items: start;
-  grid-template-columns: minmax(280px, 1fr) minmax(220px, 300px);
+  grid-template-columns: 1fr;
 }
 
 .dial {
   width: 100%;
-  max-width: 520px;
+  max-width: 440px;
   height: auto;
   background: #f9f7f0;
   border: 1px solid var(--line);
   border-radius: 12px;
+  justify-self: center;
 }
 
 .dial-track {
   fill: none;
   stroke: #d9d4c7;
   stroke-width: 7;
-  stroke-linecap: round;
+  stroke-linecap: butt;
 }
 
 .dial-range {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 9;
-  stroke-linecap: round;
+  stroke-width: 4;
+  stroke-linecap: butt;
+}
+
+.dial-target {
+  fill: none;
+  stroke: #2f5f9e;
+  stroke-width: 4;
+  stroke-linecap: butt;
+}
+
+.dial-device-span {
+  fill: none;
+  stroke: #2f8f78;
+  stroke-width: 2.4;
+  stroke-dasharray: 6 4;
+  stroke-linecap: butt;
+  opacity: 0.95;
 }
 
 .dial-current {
@@ -436,6 +602,27 @@ details > summary {
   opacity: 0.8;
 }
 
+.dial-target-bound {
+  stroke: #2f5f9e;
+  stroke-width: 1.8;
+  stroke-dasharray: 3 2;
+  opacity: 0.9;
+}
+
+.dial-accel-transition {
+  stroke: #b7791f;
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+  opacity: 0.9;
+}
+
+.dial-spec-bound {
+  stroke: #8e6da9;
+  stroke-width: 1.4;
+  stroke-dasharray: 3 3;
+  opacity: 0.75;
+}
+
 .dial-hub {
   fill: #27312d;
 }
@@ -446,25 +633,62 @@ details > summary {
   fill: #52605a;
 }
 
+.dial-ab-label {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  fill: #2f5f9e;
+}
+
 .dial-stats {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
   background: #faf8f1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 0 14px;
+}
+
+.dial-stats-col {
+  min-width: 0;
+}
+
+.dial-stats-title {
+  margin: 2px 0 8px;
+  color: #5a6661;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.dial-stats-col .kv:first-of-type {
+  border-top: 1px dashed #e5e3dc;
+}
+
+.dial-stats .kv span {
+  font-size: 0.88rem;
+  line-height: 1.2;
 }
 
 .dial-spec {
   fill: none;
   stroke: #8e6da9;
   stroke-width: 4;
-  stroke-dasharray: 4 3;
-  stroke-linecap: round;
+  stroke-linecap: butt;
 }
 
 .dial-center {
   stroke: #6d6b64;
   stroke-width: 1.5;
   stroke-dasharray: 3 2;
+}
+
+.dial-target-center {
+  stroke: #2f5f9e;
+  stroke-width: 1.8;
+  opacity: 0.8;
 }
 
 .servo-panel {
@@ -491,7 +715,7 @@ details > summary {
 .pw-graph svg {
   display: block;
   width: 100%;
-  height: 180px;
+  height: 148px;
   border: 1px solid #e2dfd4;
   border-radius: 8px;
   background: linear-gradient(180deg, #fffef9 0%, #f3efe4 100%);
@@ -571,6 +795,10 @@ details > summary {
   .dial-wrap {
     grid-template-columns: 1fr;
   }
+
+  .dial-stats {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 1180px) {
@@ -584,6 +812,12 @@ details > summary {
     flex-direction: column;
   }
 
+  .perf-stack,
+  .motion-stack,
+  .servo-stack {
+    flex-direction: column;
+  }
+
   .console-layout {
     grid-template-columns: 1fr;
     grid-template-rows: auto;
@@ -594,5 +828,32 @@ details > summary {
   .right-bottom {
     grid-column: 1;
     grid-row: auto;
+  }
+}
+
+@media (min-width: 1181px) {
+  html,
+  body {
+    height: auto;
+    overflow: auto;
+  }
+
+  main {
+    height: auto;
+    overflow: visible;
+  }
+
+  .compact-layout {
+    min-height: auto;
+    overflow: visible;
+  }
+
+  .left-stack,
+  .perf-stack,
+  .motion-stack,
+  .servo-stack {
+    height: auto;
+    overflow: visible;
+    padding-right: 0;
   }
 }

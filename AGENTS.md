@@ -9,6 +9,21 @@ This project is in a prototyping phase.
 
 Both subprojects have their own `AGENTS.md` that extends these shared rules.
 
+## Working Directory Discipline
+
+This repository has two active command contexts (`firmware` and `dashboard`).
+To avoid running the right command in the wrong folder, always use explicit
+directory scoping for terminal commands.
+
+- Before build/run commands, confirm current directory with `Get-Location`.
+- For dashboard commands, run from `dashboard/`.
+- For PlatformIO/firmware commands, run from repository root (where `platformio.ini` lives), not from `dashboard/`.
+- Prefer one-liners that set location explicitly instead of relying on terminal state.
+	- Dashboard example: `cd dashboard; npm run dev`
+	- Dashboard type-check: `cd dashboard; npx tsc --noEmit`
+	- Firmware build: `cd ..; C:\Users\tj\.platformio\penv\Scripts\platformio.exe run --environment adafruit_feather_esp32_v2`
+- If a command fails with a directory-context error (for example `NotPlatformIOProjectError`), immediately retry from the correct directory and note the correction.
+
 ## Audience
 - Primary audience includes design students with little or no coding/electronics background.
 - Prefer plain-language explanations and avoid jargon unless terms are explained.
