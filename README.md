@@ -13,6 +13,11 @@ firmware/docs/    ← Datasheets and hardware references
 Open `firmware/` in PlatformIO to build and upload device code.  
 Open `dashboard/` in a Node.js environment to run the web interface.
 
+## Vercel Deployment (Dashboard)
+- This repo includes a root `vercel.json` that targets `dashboard/package.json`.
+- If Vercel project Root Directory is accidentally left at repository root, it will still build the Next.js dashboard app.
+- Recommended: set Vercel Root Directory to `dashboard` for clarity.
+
 Author: Thomas J McLeish  
 License: MIT
 
