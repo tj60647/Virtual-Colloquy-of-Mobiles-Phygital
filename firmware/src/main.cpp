@@ -970,7 +970,7 @@ void initOled() {
   oled.setTextSize(1);
   oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 0);
-  oled.println("Colloquy Mobiles");
+  oled.println("Virtual Colloquy");
   oled.print("fw v");
   oled.println(FIRMWARE_VERSION);
   oled.println("OLED online");
@@ -1132,7 +1132,7 @@ void refreshOledStatus() {
   if (!oledStatusLayoutDrawn) {
     oled.clearDisplay();
     oled.setCursor(0, 0);
-    oled.println("Colloquy Mobiles");
+    oled.println("Virtual Colloquy");
     oled.print("fw v");
     oled.println(FIRMWARE_VERSION);
     oled.setCursor(0, 16);

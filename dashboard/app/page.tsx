@@ -153,7 +153,7 @@ function sparkPoints(
   values: number[],
   minVal: number,
   maxVal: number,
-  width = 400,
+  width = 200,
   height = 28
 ): string {
   if (values.length < 2) return "";
@@ -172,7 +172,7 @@ function timedSparkPoints(
   nowMs: number,
   minVal: number,
   maxVal: number,
-  width = 400,
+  width = 200,
   height = 28,
   windowMs = PERF_SPARK_WINDOW_MS
 ): string {
@@ -1415,7 +1415,7 @@ export default function Page() {
   return (
     <main className="console-page compact-console">
       <div className="console-header">
-        <h1>Virtual Colloquy Console</h1>
+        <h1>Colloquy of Mobiles Virtual Simulation Phygital</h1>
         <p>Focused controls: connect, stream data, motion profile, and servo arc.</p>
       </div>
 
@@ -1446,7 +1446,7 @@ export default function Page() {
           </section>
 
           <section className="card panel-tight">
-                <h1>Colloquy of Mobiles Virtual Simulation Phygital</h1>
+            <h2>Streaming Data</h2>
             <div className="kv"><span>last receive</span><code>{lastRxAt}</code></div>
             <div className="kv"><span>firmware</span><code>{telemetry.fv ?? "-"}</code></div>
             <div className="kv">
