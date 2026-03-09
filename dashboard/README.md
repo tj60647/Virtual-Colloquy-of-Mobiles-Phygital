@@ -24,9 +24,21 @@ From `dashboard/`:
 
 ## Vercel Deploy
 1. Import this repository into Vercel.
-2. Set the project root to `dashboard`.
-3. Build command: `npm run build`
-4. Output uses Next.js defaults.
+2. Set **Root Directory** to `dashboard`.
+3. Framework preset: **Next.js**.
+4. Leave defaults or use:
+	- Install command: `npm install`
+	- Build command: `npm run build`
+	- Output: Next.js default output
+5. Deploy.
+
+### Vercel CLI (optional)
+From repository root:
+- `cd dashboard`
+- `npx vercel`
+
+The included `dashboard/vercel.json` pins framework/build commands so preview
+and production deployments stay consistent.
 
 ## Browser Requirements
 WebSerial is available in Chromium-based browsers and requires a secure context:
