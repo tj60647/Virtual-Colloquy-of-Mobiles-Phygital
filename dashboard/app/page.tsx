@@ -52,6 +52,7 @@ const SERIAL_PORT_FILTERS = [
   { usbVendorId: 0x1a86 },
   { usbVendorId: 0x0403 }
 ];
+const SERIAL_BAUD_RATE = 460800;
 
 // Nordic UART Service (NUS) — standard BLE serial emulation UUIDs.
 // The firmware advertises this service; the dashboard filters on it so
@@ -1090,7 +1091,7 @@ export default function Page() {
       setConnectTips([]);
       setStatus("Requesting port...");
       const port = await navigator.serial.requestPort({ filters: SERIAL_PORT_FILTERS });
-      await port.open({ baudRate: 115200 });
+      await port.open({ baudRate: SERIAL_BAUD_RATE });
       portRef.current = port;
 
       if (!port.readable || !port.writable) {
@@ -1101,7 +1102,7 @@ export default function Page() {
       writerRef.current = port.writable.getWriter();
       setTransportType("serial");
       setConnected(true);
-      setStatus("Connected via USB at 115200 baud");
+      setStatus(`Connected via USB at ${SERIAL_BAUD_RATE} baud`);
       lastRxMsRef.current = 0;
 
       const decoder = new TextDecoder();
@@ -1519,9 +1520,9 @@ export default function Page() {
                 <div className="kv"><span>perf stream</span><code>{perfStreamActive ? "active" : "waiting"}</code></div>
                 <div className="kv"><span>value format</span><code>avg | latest</code></div>
                 <div className="kv kv-spark"><span>loop/sec (avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lps.length > 1 && <polyline points={perfSparkPointsFor("lps")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lps")}</code></span></div>
-                <div className="kv kv-spark"><span>loop period (lp avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lp.length > 1 && <polyline points={perfSparkPointsFor("lp")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lp")}</code></span></div>
-                <div className="kv kv-spark"><span>loop period avg (lpa)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lpa.length > 1 && <polyline points={perfSparkPointsFor("lpa")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lpa")}</code></span></div>
-                <div className="kv kv-spark"><span>loop period max (lpm)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lpm.length > 1 && <polyline points={perfSparkPointsFor("lpm")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lpm")}</code></span></div>
+                <div className="kv kv-spark"><span>loop period latest (lp)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lp.length > 1 && <polyline points={perfSparkPointsFor("lp")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lp")}</code></span></div>
+                <div className="kv kv-spark"><span>loop period window avg (lpa)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lpa.length > 1 && <polyline points={perfSparkPointsFor("lpa")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lpa")}</code></span></div>
+                <div className="kv kv-spark"><span>loop period window max (lpm)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lpm.length > 1 && <polyline points={perfSparkPointsFor("lpm")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lpm")}</code></span></div>
                 <div className="kv kv-spark"><span>loop duration (lu avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lu.length > 1 && <polyline points={perfSparkPointsFor("lu")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lu")}</code></span></div>
                 <div className="kv kv-spark"><span>max loop work (lm avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.lm.length > 1 && <polyline points={perfSparkPointsFor("lm")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("lm")}</code></span></div>
                 <div className="kv kv-spark"><span>serial in (si avg)</span><span className="spark-cell"><svg className="spark" viewBox="0 0 200 28" preserveAspectRatio="none" aria-hidden="true">{perfSparkHistories.si.length > 1 && <polyline points={perfSparkPointsFor("si")} className="spark-line spark-line-lu" />}</svg><code>{perfDisplayValue("si")}</code></span></div>

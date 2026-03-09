@@ -119,6 +119,7 @@ constexpr size_t POT_RUNNING_AVERAGE_SAMPLES = 64;
 constexpr size_t SERIAL_BUFFER_LEN = 64;
 constexpr size_t TELEMETRY_FRAME_BUFFER_LEN = 192;
 constexpr uint32_t STATUS_PRINT_INTERVAL_MS = 50; // 20 Hz — matches dashboard oscillator drive rate
+constexpr uint32_t SERIAL_BAUD_RATE = 460800;
 // Keep OLED responsive; partial redraw logic in refreshOledStatus() limits
 // redraw work by only updating changed value fields.
 constexpr uint32_t OLED_REFRESH_INTERVAL_MS = 250;
@@ -1253,7 +1254,7 @@ void runBootSweep() {
  * Arduino setup entry point for one-time peripheral initialization.
  */
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD_RATE);
   delay(250);
 
   // Enable and initialise the built-in NeoPixel.
