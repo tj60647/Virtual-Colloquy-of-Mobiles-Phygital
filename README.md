@@ -1,6 +1,73 @@
 # Colloquy of Mobiles Virtual Simulation — Phygital
 
-Prototype system for an ESP32-based pointer device that converts position commands from a computer into physical servo motion.
+This device physically points an arrow where a webcam is looking.
+The browser dashboard lets you test and calibrate the pointer manually; a camera detection script will eventually replace manual input.
+
+Author: Thomas J McLeish  
+License: MIT
+
+## Why This Exists — Pan-Servo Camera Tracking
+
+This is a classic pan-servo camera tracking problem.
+
+The intended use case:
+- A webcam observes a scene.
+- A detected object or point of interest has a known horizontal pixel position within the frame.
+- The servo rotates a physical pointer to aim at that position in real space.
+
+### Why commands use a normalized -100..100 range
+
+The dashboard knows pixel coordinates. The firmware knows servo angles. Neither side needs to know the other's units if we agree on a normalized intermediate format:
+
+```
+pixelX (0..frameWidth)
+  → dashboard normalizes to -100..100
+  → firmware maps to servo angle via pot calibration
+  → servo points at that horizontal position in the scene
+```
+
+This design means:
+- The **dashboard** only needs to know frame width. It never deals with servo angles, pulse widths, or physical travel limits.
+- The **firmware** only needs to know how to move the servo. It never deals with pixel math or camera geometry.
+- The **potentiometer** acts as a live calibration knob: turning it narrows or widens the physical arc the servo uses to cover the full frame. This lets you match the servo's sweep to the camera's actual field of view without changing any code.
+
+### Why you don't need to know the camera's FOV
+
+If the goal is "servo points where the object appears in the frame," the FOV value is not required. The pot calibration makes the correspondence implicit: adjust the pot until the pointer tracks correctly across the scene. The physical angle mapping is absorbed into the calibration rather than computed analytically.
+
+FOV math would only be necessary if you needed angular position in world space (e.g. "the target is 15° left of center in the room") — which is not a goal here.
+
+## Two-Phase Approach
+
+Building this system happens in two phases. **Phase 1 must work before Phase 2 can begin.**
+
+### Phase 1 — Dashboard Control (current focus)
+A human sends commands manually via the browser dashboard or Serial Monitor. This phase proves that:
+- The hardware is wired correctly.
+- The firmware maps commands to servo motion reliably.
+- The serial protocol is stable.
+- The safety guard and calibration work as expected.
+
+The dashboard is a **test and calibration scaffold**, not the end product.
+
+### Phase 2 — Camera Control (the goal)
+A computer vision script detects objects in a webcam feed and sends the same -100..100 commands automatically over the same serial channel. The firmware does not change — only the command source changes. Everything you verify in Phase 1 carries forward.
+
+## Where To Start
+
+- **"I want to make the hardware work"** → jump to [Assembly Checkpoints](#assembly-checkpoints-classroom-friendly)
+- **"I want to understand how camera tracking connects to this"** → start at [Why This Exists](#why-this-exists--pan-servo-camera-tracking)
+- **"I just want to see it move in 5 minutes"** → see `firmware/docs/design-student-quickstart.md`
+
+## Suggested Teaching Flow (90 Minutes)
+1. 10 min: Explain system purpose and open-loop concept in plain language.
+2. 15 min: Wiring check with instructor sign-off.
+3. 20 min: Oscillation mode and potentiometer calibration exercise.
+4. 20 min: Serial command exercise with command/response observation.
+5. 10 min: Runtime guard demonstration and discussion.
+6. 15 min: Reflection notes and troubleshooting debrief.
+
+---
 
 ## Repository Layout
 
@@ -13,28 +80,6 @@ firmware/docs/    ← Datasheets and hardware references
 Open `firmware/` in PlatformIO to build and upload device code.  
 Open `dashboard/` in a Node.js environment to run the web interface.
 
-## Vercel Deployment (Dashboard)
-- This repo includes a root `vercel.json` that targets `dashboard/package.json`.
-- If Vercel project Root Directory is accidentally left at repository root, it will still build the Next.js dashboard app.
-- Root URL requests are routed to the dashboard app entry so `/` resolves correctly.
-- Recommended: set Vercel Root Directory to `dashboard` for clarity.
-
-Author: Thomas J McLeish  
-License: MIT
-
-## Project Purpose
-This project creates a simple physical direction indicator:
-- A host app (for example WebSerial in a browser) sends position commands.
-- The ESP32 maps those commands to servo movement.
-- A potentiometer lets the user tune travel range in real time.
-- An optional OLED shows live system status directly on-device.
-
-The current implementation is intentionally prototype-oriented:
-- fast iteration
-- visible debug output
-- conservative hardware limits
-- reversible decisions
-
 ## Audience
 This repository is designed to be understandable to design students and beginners.
 You should be able to use this project as a reference even if you have limited coding or electronics experience.
@@ -44,6 +89,19 @@ You should be able to use this project as a reference even if you have limited c
 - Verify each hardware component incrementally.
 - Keep behavior observable through serial and OLED status output.
 - Prevent unsafe behavior when command data disappears.
+
+## Project Purpose
+This project creates a simple physical direction indicator:
+- A host app (for example the browser dashboard or Serial Monitor) sends position commands.
+- The ESP32 maps those commands to servo movement.
+- A potentiometer lets the user tune travel range in real time.
+- An optional OLED shows live system status directly on-device.
+
+The current implementation is intentionally prototype-oriented:
+- fast iteration
+- visible debug output
+- conservative hardware limits
+- reversible decisions
 
 ## What This System Is (and Is Not)
 - It is an open-loop actuator system.
@@ -162,19 +220,23 @@ Evidence to capture:
 Checkpoint 5: Serial command control
 1. Put mode switch HIGH (serial mode).
 2. Send commands: `0`, `25`, `-25`, `50`, `-50`, `100`.
+   - From **Serial Monitor**: type each value and press Enter.
+   - From the **browser dashboard**: use the quick-send buttons or the command input field. Both options exercise the same firmware path.
 3. Confirm pointer responds consistently.
 
 Evidence to capture:
-- Screenshot of serial console commands and status output.
+- Screenshot of serial console or dashboard showing commands and telemetry output.
 - Note if direction or scaling appears reversed.
 
 Checkpoint 6: Runtime safety guard
 1. In serial mode, stop sending commands for > `1500 ms`.
-2. Verify status reports `guard=timeout`.
-3. Verify pointer returns toward neutral command.
+   - From **Serial Monitor**: stop typing.
+   - From the **browser dashboard**: stop clicking send.
+2. Verify telemetry reports `g=1` (guard active).
+3. Verify pointer returns toward neutral.
 
 Evidence to capture:
-- Serial line showing `guard=timeout`.
+- Telemetry line showing `g=1`.
 - Short note confirming observed neutral behavior.
 
 ## Photo / Demo Placeholders
@@ -195,37 +257,6 @@ If you later add these files, link them from this section for instructor review.
 - Use an external servo-capable supply for motor current.
 - Keep all grounds common (ESP32 GND + servo supply GND).
 - If the servo buzzes or strains at endpoints, stop and reduce range.
-
-## Design Context: Pan-Servo Camera Tracking
-
-This is a classic pan-servo camera tracking problem.
-
-The intended use case:
-- A webcam observes a scene.
-- A detected object or point of interest has a known horizontal pixel position within the frame.
-- The servo rotates a physical pointer to aim at that position in real space.
-
-### Why commands use a normalized -100..100 range
-
-The dashboard knows pixel coordinates. The firmware knows servo angles. Neither side needs to know the other's units if we agree on a normalized intermediate format:
-
-```
-pixelX (0..frameWidth)
-  → dashboard normalizes to -100..100
-  → firmware maps to servo angle via pot calibration
-  → servo points at that horizontal position in the scene
-```
-
-This design means:
-- The **dashboard** only needs to know frame width. It never deals with servo angles, pulse widths, or physical travel limits.
-- The **firmware** only needs to know how to move the servo. It never deals with pixel math or camera geometry.
-- The **potentiometer** acts as a live calibration knob: turning it narrows or widens the physical arc the servo uses to cover the full frame. This lets you match the servo's sweep to the camera's actual field of view without changing any code.
-
-### Why you don't need to know the camera's FOV
-
-If the goal is "servo points where the object appears in the frame," the FOV value is not required. The pot calibration makes the correspondence implicit: adjust the pot until the pointer tracks correctly across the scene. The physical angle mapping is absorbed into the calibration rather than computed analytically.
-
-FOV math would only be necessary if you needed angular position in world space (e.g. "the target is 15° left of center in the room") — which is not a goal here.
 
 ## Firmware Architecture
 The project currently uses a single main module:
@@ -281,20 +312,39 @@ Oscillation mode:
 - Purpose: quickly validate motion path and pot scaling without host software
 
 ## Serial Protocol
-Current protocol is intentionally simple:
-- One command per line
-- First numeric token in each line is used
-- Input and output share the same serial channel
 
-Valid examples:
-- `0`
-- `50`
-- `-25`
-- `cmd:-40`
-- `pos=72.5`
+### Commands — dashboard/host → device
+One command per line, newline-terminated. Plain integer or float in the range `-100..100`.
+```
+37\n
+-50\n
+0\n
+```
+The firmware also accepts prefixed forms (`cmd:37`, `pos=-50`) for manual Serial Monitor use. Input is clamped to `-100..100`.
 
-Command range:
-- Input is clamped to `-100..100`
+### Telemetry — device → dashboard/host
+Compact comma-separated key=value pairs, one frame per line, newline-terminated.
+```
+c=37,m=s,g=0,p=2048,a=112,rn=45,rx=135
+```
+
+| Key | Field | Values / Units |
+|-----|-------|----------------|
+| `c` | commanded position | -100..100 |
+| `m` | control mode | `s` = serial, `o` = oscillation |
+| `g` | safety guard active | `1` = timeout/guard active, `0` = ok |
+| `p` | potentiometer ADC average | 0..4095 |
+| `a` | applied servo angle | degrees (0..180) |
+| `rn` | range minimum angle (pot-scaled) | degrees (0..180) |
+| `rx` | range maximum angle (pot-scaled) | degrees (0..180) |
+
+The dashboard displays these fields with expanded labels (e.g. "command", "mode", "guard") for readability. Both use the same underlying compact protocol.
+
+### Parsing rules
+- Split each line on `,` to get key=value pairs.
+- Split each pair on `=` to get key and value.
+- Ignore any line that does not match the pattern (startup banners, OLED messages, etc.).
+- All values are numeric except `m` which is a single character string.
 
 ## Runtime Guard
 Guard purpose:
@@ -304,12 +354,10 @@ Current guard rule:
 - In serial mode, if no valid command arrives for `1500 ms`, command is forced to `0.0`.
 
 ## Status Output
-Serial fields include:
-- `command`
-- `mode`
-- `guard`
-- `potRaw`
-- `servoAngleDeg`
+Serial telemetry is emitted in the compact format described in the Serial Protocol section above. Example:
+```
+c=37,m=s,g=0,p=2048,a=112,rn=45,rx=135
+```
 
 OLED fields include:
 - control mode
@@ -333,14 +381,6 @@ From project root:
 5. Switch to serial mode and send test values.
 6. Stop sending commands and verify guard timeout behavior.
 
-## Suggested Teaching Flow (90 Minutes)
-1. 10 min: Explain system purpose and open-loop concept in plain language.
-2. 15 min: Wiring check with instructor sign-off.
-3. 20 min: Oscillation mode and potentiometer calibration exercise.
-4. 20 min: Serial command exercise with command/response observation.
-5. 10 min: Runtime guard demonstration and discussion.
-6. 15 min: Reflection notes and troubleshooting debrief.
-
 ## Project Documents
 - `AGENTS.md`: project coding and documentation rules
 - `firmware/docs/ls-3006-servo-datasheet.md`: servo reference notes
@@ -352,6 +392,36 @@ From project root:
 - Open-loop control cannot detect actual shaft position error.
 - Mechanical end-stop stress is possible if limits are too aggressive.
 - Electrical noise from servo load can affect MCU if grounding/power are weak.
+
+---
+
+## Deploying the Dashboard (Appendix)
+
+The dashboard can be deployed to Vercel so it is accessible from any browser without a local development setup.
+
+### Vercel (recommended)
+1. Import this repository into Vercel.
+2. Set **Root Directory** to `dashboard`.
+3. Framework preset: **Next.js**.
+4. Leave other defaults or use:
+   - Install command: `npm install`
+   - Build command: `npm run build`
+5. Deploy.
+
+This repo includes a root `vercel.json` that targets `dashboard/package.json`, so if Vercel Root Directory is accidentally left at repository root, the build will still succeed.
+
+### Vercel CLI (optional)
+```
+cd dashboard
+npx vercel
+```
+
+### Browser Requirements
+WebSerial is only available in Chromium-based browsers (Chrome, Edge) and requires a secure context:
+- `https://` for production deployments
+- `http://localhost` for local development
+
+See `dashboard/README.md` for full dashboard development instructions.
 
 ## License
 MIT. See `LICENSE`.

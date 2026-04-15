@@ -46,5 +46,8 @@ WebSerial is available in Chromium-based browsers and requires a secure context:
 - `http://localhost` local dev
 
 ## Firmware Compatibility
-The dashboard expects telemetry lines in this style:
-`command=...,mode=...,guard=...,potRaw=...,rangeMinDeg=...,rangeMaxDeg=...,servoAngleDeg=...`
+The dashboard expects telemetry lines in the compact key=value format defined in the shared protocol spec:
+```
+c=37,m=s,g=0,p=2048,a=112,rn=45,rx=135
+```
+See `AGENTS.md` (root) for the full telemetry key reference. The dashboard displays these fields with expanded labels for readability.

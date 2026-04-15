@@ -1,9 +1,9 @@
 # Design Student Quickstart
 
-This guide explains how to run the pointer prototype without needing prior coding or electronics experience.
+This guide is the fastest path to seeing the pointer move. It covers only what you need to get started. For full wiring diagrams, hardware specs, and the camera-tracking context, see the main `README.md`.
 
 ## What This Device Does
-- A value from your computer (WebSerial or Serial Monitor) tells the pointer where to move.
+- A value from your computer (the browser dashboard, or Serial Monitor) tells the pointer where to move.
 - A potentiometer (knob) scales how far the pointer can travel.
 - A mode switch chooses between:
   - `Serial mode`: follows commands from your computer.
@@ -15,63 +15,44 @@ This guide explains how to run the pointer prototype without needing prior codin
 - Always connect grounds together: ESP32 GND and servo power GND must be common.
 - If the servo buzzes loudly or strains at endpoints, stop and reduce range settings.
 
-## Wiring Overview
-Servo (LS-3006 style wiring):
-- `Black` -> `GND`
-- `Red` -> `Servo V+` (external 5V typical)
-- `Yellow` -> signal pin (`GPIO13` in this project)
+## Wiring and Build
+See the **Wiring** and **Build and Run** sections in `README.md` for full details.
 
-Potentiometer:
-- Center wiper -> `A0`
-- One side -> `3.3V`
-- Other side -> `GND`
-
-Mode switch (uses internal pull-up):
-- Recommended 3-pin SPDT toggle:
-  - Center/common pin -> `GPIO12`
-  - One outer pin -> `GND`
-  - Other outer pin -> leave unconnected
-- Alternate 2-pin switch:
-  - One side -> `GPIO12`
-  - Other side -> `GND`
-- Logic:
-  - Not connected to GND (HIGH) = `Serial mode`
-  - Connected to GND (LOW) = `Oscillation mode`
-
-OLED (GM12864, I2C):
-- `VCC` -> `3.3V`
-- `GND` -> `GND`
-- `SDA` -> board `SDA` pin (Feather ESP32 V2 maps this to GPIO22)
-- `SCL` -> board `SCL` pin (Feather ESP32 V2 maps this to GPIO20)
-- Address is usually `0x3C` (alternate `0x3D`)
-
-## Build, Upload, Monitor
-From the project folder:
-- Build: `pio run`
-- Upload: `pio run -t upload`
-- Monitor: `pio device monitor -b 115200`
+Quick reference:
+- Servo signal wire → `GPIO13`
+- Potentiometer wiper → `A0`
+- Mode switch → `GPIO12` and `GND`
+- Build: `pio run` | Upload: `pio run -t upload` | Monitor: `pio device monitor -b 115200`
 
 ## How To Test In 5 Minutes
-1. Turn on power and open serial monitor.
+1. Turn on power and open the serial monitor or browser dashboard.
 2. Confirm startup messages appear.
 3. Put switch in `Oscillation mode` to check smooth movement.
 4. Turn potentiometer and verify motion range changes.
 5. Switch to `Serial mode`.
-6. Send test commands with newline, for example:
+6. Send test commands (newline-terminated), for example:
    - `0`
    - `50`
    - `-50`
    - `100`
 
-## What The Status Lines Mean
+## What The Telemetry Lines Mean
 Example:
-`command=-23.5,mode=serial,guard=ok,potRaw=2012,servoAngleDeg=78.2`
+```
+c=-23,m=s,g=0,p=2012,a=78,rn=45,rx=135
+```
 
-- `command`: control value currently used by firmware (-100 to +100)
-- `mode`: `serial` or `osc`
-- `guard`: `ok` or `timeout` (timeout means serial data stopped, so firmware forced neutral)
-- `potRaw`: potentiometer ADC reading (0 to 4095)
-- `servoAngleDeg`: target servo angle sent by firmware
+| Key | Field | Example | Meaning |
+|-----|-------|---------|---------|
+| `c` | command | `-23` | control value currently used by firmware (-100 to +100) |
+| `m` | mode | `s` | `s` = serial, `o` = oscillation |
+| `g` | guard | `0` | `0` = ok, `1` = timeout (no commands received, firmware forced neutral) |
+| `p` | potRaw | `2012` | potentiometer ADC reading (0 to 4095) |
+| `a` | angle | `78` | target servo angle in degrees |
+| `rn` | rangeMin | `45` | minimum angle of pot-scaled travel range |
+| `rx` | rangeMax | `135` | maximum angle of pot-scaled travel range |
+
+The browser dashboard displays these same values with expanded labels for readability.
 
 ## Troubleshooting
 - No OLED text:
@@ -82,10 +63,11 @@ Example:
   - Confirm yellow signal wire goes to the configured servo pin.
 - Servo moves in wrong direction:
   - This can happen with clone variants; note behavior and we can invert mapping in code.
-- Status shows `guard=timeout` in serial mode:
+- Telemetry shows `g=1` in serial mode:
   - Send commands more frequently, newline-terminated.
 
 ## Vocabulary (Plain Language)
 - `Open-loop`: the firmware sends commands but does not read true servo position feedback.
 - `PWM pulse`: timing signal used to tell the servo where/how to move.
 - `Neutral`: midpoint command where no extreme motion is requested.
+- `Guard / timeout`: if no command arrives for 1500 ms in serial mode, the firmware forces the command to 0 (neutral) as a safety measure.
