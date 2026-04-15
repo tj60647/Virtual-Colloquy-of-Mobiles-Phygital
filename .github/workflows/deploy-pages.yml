@@ -1,0 +1,88 @@
+# deploy-pages.yml
+# Colloquy of Mobiles Virtual Simulation — Phygital
+# Author: Thomas J McLeish
+# License: MIT
+#
+# Builds the Next.js dashboard as a static export and publishes it to GitHub Pages.
+# Triggered on every push to main, and can also be run manually from the Actions tab.
+#
+# Published URL: https://tj60647.github.io/Virtual-Colloquy-Direction-Indicator/
+#
+# How this works:
+#   1. Check out the repo.
+#   2. Install Node.js dependencies in dashboard/.
+#   3. Run `next build` — because next.config.mjs sets `output: 'export'`,
+#      this produces a static `dashboard/out/` folder instead of a server build.
+#   4. Upload that folder as a GitHub Pages artifact and deploy it.
+#
+# Requirements (one-time setup in repo settings):
+#   - Settings → Pages → Source: "GitHub Actions"
+#   - The workflow needs `pages: write` and `id-token: write` permissions (already set below).
+
+name: Deploy Dashboard to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main        # Auto-deploy on every push to main
+  workflow_dispatch: # Also allows manual trigger from the Actions tab
+
+# Grant the workflow the minimum permissions needed to publish to Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one deployment to run at a time.
+# If a new push arrives while a deployment is in progress, cancel the in-progress run
+# rather than queuing behind it — this keeps the live site current.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build static export
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          # dashboard/ is the npm workspace — cache based on its lockfile.
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build Next.js static export
+        working-directory: dashboard
+        run: npm run build
+        # next build writes the static output to dashboard/out/ because
+        # next.config.mjs sets output: 'export'.
+
+      - name: Configure GitHub Pages artifact
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Upload the static export folder produced by `next build`.
+          path: dashboard/out
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

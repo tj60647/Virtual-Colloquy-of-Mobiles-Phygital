@@ -19,6 +19,13 @@ Open `dashboard/` in a Node.js environment to run the web interface.
 - Root URL requests are routed to the dashboard app entry so `/` resolves correctly.
 - Recommended: set Vercel Root Directory to `dashboard` for clarity.
 
+## GitHub Pages (Dashboard)
+- Live URL: **https://tj60647.github.io/Virtual-Colloquy-Direction-Indicator/**
+- Automatically deployed on every push to `main` via GitHub Actions (`.github/workflows/deploy-pages.yml`).
+- The `dashboard/` folder is built as a fully static export (`output: 'export'` in `dashboard/next.config.mjs`) and published from `dashboard/out/`.
+- WebSerial works because GitHub Pages serves over HTTPS, which is required by the browser to allow serial port access.
+- One-time repo setup required: go to **Settings → Pages → Source** and select **"GitHub Actions"**.
+
 Author: Thomas J McLeish  
 License: MIT
 
