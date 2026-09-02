@@ -1,5 +1,11 @@
 # LS-3006 Plastic Gear Analog Servo - Technical Data Sheet
 
+> **Superseded. Do not wire or calibrate from this document.**
+> This project moved to the MG996R. The current part, its wire colors
+> (`Brown`/`Red`/`Orange`, not the `Black`/`Red`/`Yellow` below) and the firmware pulse
+> calibration are documented in [`mg996r-servo.md`](mg996r-servo.md). This file is retained
+> for history only.
+
 Source provided by project owner on 2026-03-07.
 
 ## Product And Vendor

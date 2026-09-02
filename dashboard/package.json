@@ -1,7 +1,8 @@
 {
-  "name": "colloquy-of-mobiles-virtual-simulation-phygital",
+  "name": "colloquy-of-mobiles-phygital-dashboard",
   "version": "0.1.0",
   "private": true,
+  "description": "Browser dashboard for the Colloquy of Mobiles Phygital ESP32 pointer rig: Web Serial and Web Bluetooth control plus live telemetry.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
