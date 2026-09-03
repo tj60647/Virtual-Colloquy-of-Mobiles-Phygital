@@ -1,4 +1,6 @@
-# Colloquy of Mobiles Phygital — an ESP32 pointer you drive from a browser
+# Virtual Colloquy of Mobiles — Phygital
+
+An ESP32 pointer you drive from a browser.
 
 One servo on a stick, one ESP32, and a web page that moves it. You send a number between
 `-100` and `100`; the pointer swings to that position and streams back what it did. The
@@ -10,10 +12,10 @@ number in a text box to a physical arc in the room, and can watch every stage of
 on screen while it happens.
 
 This repository is **not** a virtual simulation, despite the folder name you may have
-checked it out under. The `Colloquy-of-Mobiles-Virtual-Simulation-` prefix was inherited
+checked it out under. The `Virtual-Colloquy-of-Mobiles-` prefix was inherited
 from a sibling project and never described this one. On GitHub the repository is
-`Colloquy-of-Mobiles-Phygital`; the flagship software system is a separate repository,
-`Colloquy-of-Mobiles-Virtual-Simulation`. Nothing here talks to it.
+`Virtual-Colloquy-of-Mobiles-Phygital`; the flagship software system is a separate repository,
+`Virtual-Colloquy-of-Mobiles`. Nothing here talks to it.
 
 Author: Thomas J McLeish
 License: MIT
